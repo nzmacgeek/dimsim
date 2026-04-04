@@ -665,7 +665,7 @@ func runScript(script, name, pkgName string) error {
 	}
 	defer os.Remove(tmpFile)
 
-	cmd := exec.Command("/bin/sh", tmpFile)
+	cmd := exec.Command("/bin/bash", tmpFile)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

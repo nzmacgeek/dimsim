@@ -233,7 +233,7 @@ func fileHash(path string) (string, error) {
 
 // --- embedded template scripts ---
 
-const templatePreinst = `#!/bin/sh
+const templatePreinst = `#!/bin/bash
 # Pre-installation script
 # Called before files are placed.
 set -e
@@ -244,7 +244,7 @@ set -e
 exit 0
 `
 
-const templatePostinst = `#!/bin/sh
+const templatePostinst = `#!/bin/bash
 # Post-installation script
 # Called after files are placed.
 set -e
@@ -255,7 +255,7 @@ set -e
 exit 0
 `
 
-const templatePreRm = `#!/bin/sh
+const templatePreRm = `#!/bin/bash
 # Pre-removal script
 # Called before files are removed.
 set -e
@@ -266,7 +266,7 @@ set -e
 exit 0
 `
 
-const templatePostRm = `#!/bin/sh
+const templatePostRm = `#!/bin/bash
 # Post-removal script
 # Called after files are removed.
 set -e
