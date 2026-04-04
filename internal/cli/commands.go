@@ -6,7 +6,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/nzmacgeek/dimsim/internal/install"
 	"github.com/nzmacgeek/dimsim/internal/pkg"
 	"github.com/nzmacgeek/dimsim/internal/repo"
 	"github.com/nzmacgeek/dimsim/internal/state"
@@ -138,117 +137,6 @@ func newInfoCmd(db *state.DB) *cobra.Command {
 			}
 
 			return nil
-		},
-	}
-}
-
-func newInstallCmd(db *state.DB) *cobra.Command {
-	return &cobra.Command{
-		Use:   "install <package...>",
-		Short: "Install packages",
-		Args:  cobra.MinimumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client := repo.NewClient(db)
-			ins := install.New(db, client)
-			return ins.Install(args, false)
-		},
-	}
-}
-
-func newRemoveCmd(db *state.DB) *cobra.Command {
-	var purge bool
-	cmd := &cobra.Command{
-		Use:     "remove <package...>",
-		Aliases: []string{"rm"},
-		Short:   "Remove packages",
-		Args:    cobra.MinimumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client := repo.NewClient(db)
-			ins := install.New(db, client)
-			return ins.Remove(args, purge)
-		},
-	}
-	cmd.Flags().BoolVar(&purge, "purge", false, "Also remove configuration files")
-	return cmd
-}
-
-func newUpgradeCmd(db *state.DB) *cobra.Command {
-	return &cobra.Command{
-		Use:   "upgrade [package...]",
-		Short: "Upgrade installed packages",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client := repo.NewClient(db)
-			ins := install.New(db, client)
-			return ins.Upgrade(args)
-		},
-	}
-}
-
-func newAutoremoveCmd(db *state.DB) *cobra.Command {
-	return &cobra.Command{
-		Use:   "autoremove",
-		Short: "Remove automatically installed packages no longer needed",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client := repo.NewClient(db)
-			ins := install.New(db, client)
-			return ins.AutoRemove()
-		},
-	}
-}
-
-func newVerifyCmd(db *state.DB) *cobra.Command {
-	return &cobra.Command{
-		Use:   "verify",
-		Short: "Verify installed files against recorded hashes",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client := repo.NewClient(db)
-			ins := install.New(db, client)
-			return ins.Verify()
-		},
-	}
-}
-
-func newPinCmd(db *state.DB) *cobra.Command {
-	return &cobra.Command{
-		Use:   "pin <package>",
-		Short: "Pin a package to prevent upgrades",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := db.SetPinned(args[0], true); err != nil {
-				return err
-			}
-			fmt.Printf("✓ Pinned %s\n", args[0])
-			return nil
-		},
-	}
-}
-
-func newUnpinCmd(db *state.DB) *cobra.Command {
-	return &cobra.Command{
-		Use:   "unpin <package>",
-		Short: "Unpin a package to allow upgrades",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := db.SetPinned(args[0], false); err != nil {
-				return err
-			}
-			fmt.Printf("✓ Unpinned %s\n", args[0])
-			return nil
-		},
-	}
-}
-
-func newDoctorCmd(db *state.DB) *cobra.Command {
-	return &cobra.Command{
-		Use:   "doctor",
-		Short: "Check system health",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client := repo.NewClient(db)
-			ins := install.New(db, client)
-			return ins.Doctor()
 		},
 	}
 }

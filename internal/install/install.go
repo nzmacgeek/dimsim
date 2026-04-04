@@ -39,14 +39,18 @@ func NewOffline(rootDir string, db *state.DB, client *repo.Client) *Installer {
 }
 
 // isOffline returns true when the installer is operating on a target rootfs.
-func (ins *Installer) isOffline() bool { return ins.RootDir != "" }
+func (ins *Installer) isOffline() bool {
+	return ins.RootDir != ""
+}
 
 // rootPath prepends ins.RootDir to the path when in offline mode.
+// It uses strings.TrimLeft so that absolute paths (starting with /) are
+// correctly joined under RootDir rather than discarding the root prefix.
 func (ins *Installer) rootPath(p string) string {
-	if ins.RootDir == "" {
+	if !ins.isOffline() {
 		return p
 	}
-	return filepath.Join(ins.RootDir, p)
+	return filepath.Join(ins.RootDir, strings.TrimLeft(p, string(filepath.Separator)))
 }
 
 // worldFilePath returns the path to the world file (possibly rooted).
@@ -292,12 +296,19 @@ func (ins *Installer) Install(names []string, auto bool) error {
 
 		// Record files (using TARGET paths, no rootDir prefix)
 		for _, targetPath := range movedFiles {
-			h, _ := fileHash(ins.rootPath(targetPath))
-			ins.db.AddFile(state.FileRecord{
+			h, err := fileHash(ins.rootPath(targetPath))
+			if err != nil {
+				rollback()
+				return fmt.Errorf("hash installed file %s for package %s: %w", targetPath, d.manifest.Name, err)
+			}
+			if err := ins.db.AddFile(state.FileRecord{
 				Path:    targetPath,
 				Package: d.manifest.Name,
 				Hash:    h,
-			})
+			}); err != nil {
+				rollback()
+				return fmt.Errorf("record installed file %s for package %s: %w", targetPath, d.manifest.Name, err)
+			}
 		}
 
 		installed = append(installed, d.manifest.Name)
@@ -362,7 +373,9 @@ func (ins *Installer) removeOne(p *state.Package, purge bool) error {
 
 	// Run prerm (skipped in offline mode — scripts run on target boot)
 	if !ins.isOffline() && manifest.Scripts.PreRm != "" {
-		runScript(manifest.Scripts.PreRm, "prerm", p.Name)
+		if err := runScript(manifest.Scripts.PreRm, "prerm", p.Name); err != nil {
+			fmt.Printf("  Warning: prerm for %s failed: %v\n", p.Name, err)
+		}
 	}
 
 	// Remove files
@@ -374,9 +387,13 @@ func (ins *Installer) removeOne(p *state.Package, purge bool) error {
 		ins.db.RemoveFile(f.Path)
 	}
 
-	// Run postrm (skipped in offline mode)
+	// Run postrm (skipped in offline mode).
+	// When purge is requested, pass DIMSIM_PURGE=1 in the environment so that
+	// the script can detect the purge operation without unsafe string injection.
 	if !ins.isOffline() && manifest.Scripts.PostRm != "" {
-		runScript(manifest.Scripts.PostRm, "postrm", p.Name)
+		if err := runScriptEnv(manifest.Scripts.PostRm, "postrm", p.Name, purge); err != nil {
+			fmt.Printf("  Warning: postrm for %s failed: %v\n", p.Name, err)
+		}
 	}
 
 	if err := ins.db.RemovePackage(p.Name); err != nil {
@@ -753,6 +770,13 @@ func fileHash(path string) (string, error) {
 }
 
 func runScript(script, name, pkgName string) error {
+	return runScriptEnv(script, name, pkgName, false)
+}
+
+// runScriptEnv writes script to a temp file and executes it with /bin/bash.
+// When purge is true, DIMSIM_PURGE=1 is added to the environment so postrm
+// scripts can detect a purge without unsafe string injection.
+func runScriptEnv(script, name, pkgName string, purge bool) error {
 	tmpFile := filepath.Join(state.StagingDir, fmt.Sprintf("%s-%s.sh", pkgName, name))
 	if err := os.MkdirAll(state.StagingDir, 0755); err != nil {
 		return fmt.Errorf("create staging dir: %w", err)
@@ -765,5 +789,9 @@ func runScript(script, name, pkgName string) error {
 	cmd := exec.Command("/bin/bash", tmpFile)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	if purge {
+		cmd.Env = append(cmd.Env, "DIMSIM_PURGE=1")
+	}
 	return cmd.Run()
 }

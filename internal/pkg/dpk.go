@@ -213,6 +213,9 @@ func ExtractDpkPayload(dpkPath, destDir string) ([]string, error) {
 	tr := tar.NewReader(zr)
 	var extracted []string
 
+	// Ensure destDir is cleaned and absolute so containment checks are reliable.
+	destDir = filepath.Clean(destDir)
+
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -231,7 +234,25 @@ func ExtractDpkPayload(dpkPath, destDir string) ([]string, error) {
 			continue
 		}
 
-		dest := filepath.Join(destDir, filepath.FromSlash(rel))
+		// Reject any path that is absolute or contains ".." segments to prevent
+		// directory traversal attacks from crafted .dpk archives.
+		if filepath.IsAbs(rel) {
+			return nil, fmt.Errorf("payload entry has absolute path: %s", hdr.Name)
+		}
+		cleaned := filepath.Clean(filepath.FromSlash(rel))
+		if strings.HasPrefix(cleaned, "..") {
+			return nil, fmt.Errorf("payload entry escapes staging directory: %s", hdr.Name)
+		}
+
+		dest := filepath.Join(destDir, cleaned)
+
+		// Verify the resolved destination is actually inside destDir using
+		// filepath.Rel, which is reliable across platforms regardless of
+		// separator differences.
+		rel2, err := filepath.Rel(destDir, dest)
+		if err != nil || strings.HasPrefix(rel2, "..") {
+			return nil, fmt.Errorf("payload entry resolves outside staging directory: %s", hdr.Name)
+		}
 
 		if hdr.Typeflag == tar.TypeDir {
 			if err := os.MkdirAll(dest, os.FileMode(hdr.Mode)|0755); err != nil {

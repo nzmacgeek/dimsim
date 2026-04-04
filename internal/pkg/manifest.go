@@ -39,17 +39,59 @@ type Manifest struct {
 	Scripts     Scripts     `json:"scripts,omitempty"`
 }
 
+// identifierAlwaysAllowed is the set of non-alphanumeric characters that are
+// always permitted in manifest identifier fields (name, version, arch).
+const identifierAlwaysAllowed = "._+-"
+
+// validateManifestIdentifier checks that a manifest field value is safe to use
+// as a filesystem path component. It must be non-empty, must not be "." or "..",
+// must not contain path separators, and may only contain alphanumeric characters
+// plus identifierAlwaysAllowed and extraAllowed.
+func validateManifestIdentifier(field, value, extraAllowed string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("manifest missing required field: %s", field)
+	}
+	if value == "." || value == ".." {
+		return "", fmt.Errorf("manifest field %q must not be %q", field, value)
+	}
+	if strings.ContainsAny(value, `/\`) {
+		return "", fmt.Errorf("manifest field %q contains path separator", field)
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case strings.ContainsRune(identifierAlwaysAllowed, r):
+		case extraAllowed != "" && strings.ContainsRune(extraAllowed, r):
+		default:
+			return "", fmt.Errorf("manifest field %q contains invalid character %q", field, r)
+		}
+	}
+	return value, nil
+}
+
 // ParseManifest parses a manifest from JSON bytes.
 func ParseManifest(data []byte) (*Manifest, error) {
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("parse manifest: %w", err)
 	}
-	if m.Name == "" {
-		return nil, fmt.Errorf("manifest missing required field: name")
+
+	var err error
+	if m.Name, err = validateManifestIdentifier("name", m.Name, ""); err != nil {
+		return nil, err
 	}
-	if m.Version == "" {
-		return nil, fmt.Errorf("manifest missing required field: version")
+	// Version fields allow "~" and ":" which are common in Debian-style versions.
+	if m.Version, err = validateManifestIdentifier("version", m.Version, "~:"); err != nil {
+		return nil, err
+	}
+	// Arch is optional; validate if present.
+	if m.Arch != "" {
+		if m.Arch, err = validateManifestIdentifier("arch", m.Arch, ""); err != nil {
+			return nil, err
+		}
 	}
 	return &m, nil
 }

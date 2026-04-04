@@ -106,12 +106,21 @@ type TUFTargetsSigned struct {
 
 // VerifyTUFSignatures checks that envelope has enough valid signatures for the given role.
 // keys is the full key map from root; role provides key IDs and threshold.
+// Each unique authorized key ID may contribute at most one count toward the threshold,
+// even if its signature appears multiple times in the envelope.
 func VerifyTUFSignatures(envelope *TUFSigned, keys map[string]TUFKey, role TUFRole) error {
 	// The signed payload that is actually signed over
 	payload := envelope.Signed
 
-	valid := 0
+	// Use a set to count distinct authorized key IDs that have a valid signature.
+	validKeyIDs := make(map[string]struct{})
+
 	for _, sig := range envelope.Signatures {
+		// Ignore duplicate key IDs — each key can contribute at most once.
+		if _, already := validKeyIDs[sig.KeyID]; already {
+			continue
+		}
+
 		key, ok := keys[sig.KeyID]
 		if !ok {
 			continue
@@ -142,12 +151,12 @@ func VerifyTUFSignatures(envelope *TUFSigned, keys map[string]TUFKey, role TUFRo
 		}
 
 		if ed25519.Verify(ed25519.PublicKey(pubBytes), payload, sigBytes) {
-			valid++
+			validKeyIDs[sig.KeyID] = struct{}{}
 		}
 	}
 
-	if valid < role.Threshold {
-		return fmt.Errorf("insufficient valid signatures: got %d, need %d", valid, role.Threshold)
+	if len(validKeyIDs) < role.Threshold {
+		return fmt.Errorf("insufficient valid signatures: got %d, need %d", len(validKeyIDs), role.Threshold)
 	}
 	return nil
 }
@@ -188,6 +197,10 @@ func ParseRoot(data []byte) (*TUFRootSigned, *TUFSigned, error) {
 		return nil, nil, fmt.Errorf("expected root metadata, got %q", signed.Type)
 	}
 
+	if time.Now().After(signed.Expires) {
+		return nil, nil, fmt.Errorf("root metadata expired at %s", signed.Expires.Format(time.RFC3339))
+	}
+
 	rootRole, ok := signed.Roles["root"]
 	if !ok {
 		return nil, nil, fmt.Errorf("root.json missing root role")
@@ -221,6 +234,10 @@ func ParseTimestamp(data []byte, root *TUFRootSigned) (*TUFTimestampSigned, erro
 		return nil, fmt.Errorf("parse timestamp signed: %w", err)
 	}
 
+	if signed.Type != "timestamp" {
+		return nil, fmt.Errorf("expected timestamp metadata, got %q", signed.Type)
+	}
+
 	if time.Now().After(signed.Expires) {
 		return nil, fmt.Errorf("timestamp metadata expired at %s", signed.Expires.Format(time.RFC3339))
 	}
@@ -249,6 +266,10 @@ func ParseSnapshot(data []byte, root *TUFRootSigned) (*TUFSnapshotSigned, error)
 		return nil, fmt.Errorf("parse snapshot signed: %w", err)
 	}
 
+	if signed.Type != "snapshot" {
+		return nil, fmt.Errorf("expected snapshot metadata, got %q", signed.Type)
+	}
+
 	if time.Now().After(signed.Expires) {
 		return nil, fmt.Errorf("snapshot metadata expired at %s", signed.Expires.Format(time.RFC3339))
 	}
@@ -275,6 +296,10 @@ func ParseTargets(data []byte, root *TUFRootSigned) (*TUFTargetsSigned, error) {
 	var signed TUFTargetsSigned
 	if err := json.Unmarshal(envelope.Signed, &signed); err != nil {
 		return nil, fmt.Errorf("parse targets signed: %w", err)
+	}
+
+	if signed.Type != "targets" {
+		return nil, fmt.Errorf("expected targets metadata, got %q", signed.Type)
 	}
 
 	if time.Now().After(signed.Expires) {

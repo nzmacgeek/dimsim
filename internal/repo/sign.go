@@ -30,7 +30,10 @@ func GenerateKey() (RepoKey, TUFKey, error) {
 		Scheme:  "ed25519",
 		KeyVal:  TUFKeyVal{Public: hex.EncodeToString(pub)},
 	}
-	keyID := ComputeKeyID(tufKey)
+	keyID, err := ComputeKeyID(tufKey)
+	if err != nil {
+		return RepoKey{}, TUFKey{}, err
+	}
 
 	rk := RepoKey{
 		KeyID:   keyID,
@@ -41,12 +44,15 @@ func GenerateKey() (RepoKey, TUFKey, error) {
 }
 
 // ComputeKeyID returns the TUF key ID (SHA-256 of the canonical key JSON).
-func ComputeKeyID(key TUFKey) string {
+func ComputeKeyID(key TUFKey) (string, error) {
 	// Canonical JSON: fields in alphabetical order — Go's json.Marshal sorts
 	// struct fields by their json tags, which matches alphabetical order here.
-	data, _ := json.Marshal(key)
+	data, err := json.Marshal(key)
+	if err != nil {
+		return "", fmt.Errorf("marshal TUF key for key ID computation: %w", err)
+	}
 	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
+	return hex.EncodeToString(h[:]), nil
 }
 
 // signPayload signs payload bytes with an ed25519 private key and returns a

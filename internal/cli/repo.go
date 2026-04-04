@@ -6,49 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/nzmacgeek/dimsim/internal/repo"
 	"github.com/nzmacgeek/dimsim/internal/state"
 )
-
-// newRepoCmd returns the repo subcommand tree.
-func newRepoCmd(db *state.DB) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "repo",
-		Short: "Manage repositories",
-	}
-	cmd.AddCommand(newRepoAddCmd(db))
-	cmd.AddCommand(newRepoListCmd(db))
-	cmd.AddCommand(newRepoRemoveCmd(db))
-	return cmd
-}
-
-func newRepoAddCmd(db *state.DB) *cobra.Command {
-	var priority int
-
-	cmd := &cobra.Command{
-		Use:   "add <name> <url>",
-		Short: "Add a repository",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
-			url := args[1]
-
-			existing, err := db.GetRepo(name)
-			if err != nil {
-				return fmt.Errorf("check repo: %w", err)
-			}
-			if existing != nil {
-				return fmt.Errorf("repository %q already exists (url: %s)", name, existing.URL)
-			}
-
-			client := repo.NewClient(db)
-			return client.AddRepo(name, url, priority)
-		},
-	}
-
-	cmd.Flags().IntVar(&priority, "priority", 100, "Repository priority (higher = preferred)")
-	return cmd
-}
 
 func newRepoListCmd(db *state.DB) *cobra.Command {
 	return &cobra.Command{
