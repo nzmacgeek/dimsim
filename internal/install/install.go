@@ -1,0 +1,672 @@
+package install
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/nzmacgeek/dimsim/internal/pkg"
+	"github.com/nzmacgeek/dimsim/internal/repo"
+	"github.com/nzmacgeek/dimsim/internal/state"
+	"github.com/nzmacgeek/dimsim/internal/world"
+)
+
+// Installer handles package installation, removal, and upgrade.
+type Installer struct {
+	db     *state.DB
+	client *repo.Client
+}
+
+// New creates a new Installer.
+func New(db *state.DB, client *repo.Client) *Installer {
+	return &Installer{db: db, client: client}
+}
+
+// Install installs the given packages with full dependency resolution.
+// If auto is true, packages are marked as automatically installed.
+func (ins *Installer) Install(names []string, auto bool) error {
+	// Resolve all packages including dependencies
+	plan, err := ins.resolveDeps(names)
+	if err != nil {
+		return fmt.Errorf("dependency resolution: %w", err)
+	}
+
+	if len(plan) == 0 {
+		fmt.Println("Nothing to install.")
+		return nil
+	}
+
+	fmt.Printf("The following packages will be installed:\n")
+	for _, item := range plan {
+		marker := ""
+		for _, explicit := range names {
+			if explicit == item.Name {
+				marker = " [explicit]"
+				break
+			}
+		}
+		fmt.Printf("  %s %s%s\n", item.Name, item.Version, marker)
+	}
+
+	// Download all packages first
+	type downloadedPkg struct {
+		planItem planItem
+		dpkPath  string
+		manifest *pkg.Manifest
+	}
+	var downloaded []downloadedPkg
+
+	for _, item := range plan {
+		fmt.Printf("  Downloading %s-%s...\n", item.Name, item.Version)
+		dpkPath, err := ins.client.DownloadPackage(item.Repo, item.Filename, item.Meta)
+		if err != nil {
+			return fmt.Errorf("download %s: %w", item.Name, err)
+		}
+		manifest, err := pkg.ReadDpkManifest(dpkPath)
+		if err != nil {
+			return fmt.Errorf("read manifest %s: %w", item.Name, err)
+		}
+		downloaded = append(downloaded, downloadedPkg{item, dpkPath, manifest})
+	}
+
+	// Transactional install
+	var installed []string
+	var backups []backup
+
+	rollback := func() {
+		for i := len(installed) - 1; i >= 0; i-- {
+			pkgName := installed[i]
+			files, _ := ins.db.GetFilesForPackage(pkgName)
+			for _, f := range files {
+				os.Remove(f.Path)
+				ins.db.RemoveFile(f.Path)
+			}
+			ins.db.RemovePackage(pkgName)
+		}
+		for _, b := range backups {
+			b.restore()
+		}
+	}
+
+	for _, d := range downloaded {
+		isExplicit := false
+		for _, n := range names {
+			if n == d.manifest.Name {
+				isExplicit = true
+				break
+			}
+		}
+		isAuto := auto && !isExplicit
+
+		stagingDir := filepath.Join(state.StagingDir, d.manifest.Name)
+		if err := os.MkdirAll(stagingDir, 0755); err != nil {
+			rollback()
+			return fmt.Errorf("create staging dir: %w", err)
+		}
+
+		// Extract to staging
+		extracted, err := pkg.ExtractDpkPayload(d.dpkPath, stagingDir)
+		if err != nil {
+			os.RemoveAll(stagingDir)
+			rollback()
+			return fmt.Errorf("extract %s: %w", d.manifest.Name, err)
+		}
+
+		// Run preinst
+		if d.manifest.Scripts.PreInst != "" {
+			if err := runScript(d.manifest.Scripts.PreInst, "preinst", d.manifest.Name); err != nil {
+				os.RemoveAll(stagingDir)
+				rollback()
+				return fmt.Errorf("preinst for %s: %w", d.manifest.Name, err)
+			}
+		}
+
+		// Move files from staging to root
+		var pkgBackups []backup
+		var movedFiles []string
+
+		for _, src := range extracted {
+			rel, err := filepath.Rel(stagingDir, src)
+			if err != nil {
+				continue
+			}
+			dest := "/" + filepath.ToSlash(rel)
+
+			// Backup existing file
+			if _, err := os.Stat(dest); err == nil {
+				b, err := backupFile(dest)
+				if err == nil {
+					pkgBackups = append(pkgBackups, b)
+				}
+			}
+
+			if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+				for _, b := range pkgBackups {
+					b.restore()
+				}
+				os.RemoveAll(stagingDir)
+				rollback()
+				return fmt.Errorf("create parent dir for %s: %w", dest, err)
+			}
+
+			if err := moveFile(src, dest); err != nil {
+				for _, b := range pkgBackups {
+					b.restore()
+				}
+				os.RemoveAll(stagingDir)
+				rollback()
+				return fmt.Errorf("move file %s: %w", dest, err)
+			}
+			movedFiles = append(movedFiles, dest)
+		}
+
+		os.RemoveAll(stagingDir)
+
+		// Run postinst
+		if d.manifest.Scripts.PostInst != "" {
+			if err := runScript(d.manifest.Scripts.PostInst, "postinst", d.manifest.Name); err != nil {
+				// Remove moved files and rollback
+				for _, f := range movedFiles {
+					os.Remove(f)
+				}
+				for _, b := range pkgBackups {
+					b.restore()
+				}
+				rollback()
+				return fmt.Errorf("postinst for %s: %w", d.manifest.Name, err)
+			}
+		}
+
+		backups = append(backups, pkgBackups...)
+
+		// Record in state DB
+		p := &state.Package{
+			Name:        d.manifest.Name,
+			Version:     d.manifest.Version,
+			Arch:        d.manifest.Arch,
+			Description: d.manifest.Description,
+			Depends:     d.manifest.Depends,
+			Provides:    d.manifest.Provides,
+			InstalledAt: time.Now(),
+			Pinned:      false,
+			Auto:        isAuto,
+		}
+		if err := ins.db.UpsertPackage(p); err != nil {
+			rollback()
+			return fmt.Errorf("record package %s: %w", d.manifest.Name, err)
+		}
+
+		// Record files
+		for _, f := range movedFiles {
+			h, _ := fileHash(f)
+			ins.db.AddFile(state.FileRecord{
+				Path:    f,
+				Package: d.manifest.Name,
+				Hash:    h,
+			})
+		}
+
+		installed = append(installed, d.manifest.Name)
+
+		// Update world file for explicit installs
+		if !isAuto {
+			if err := world.Add(d.manifest.Name); err != nil {
+				fmt.Printf("  Warning: could not update world file: %v\n", err)
+			}
+		}
+
+		fmt.Printf("  ✓ Installed %s %s\n", d.manifest.Name, d.manifest.Version)
+	}
+
+	return nil
+}
+
+// Remove removes the given packages.
+func (ins *Installer) Remove(names []string, purge bool) error {
+	// Check for reverse dependencies
+	for _, name := range names {
+		if err := ins.checkReverseDeps(name); err != nil {
+			return err
+		}
+	}
+
+	for _, name := range names {
+		p, err := ins.db.GetPackage(name)
+		if err != nil {
+			return err
+		}
+		if p == nil {
+			fmt.Printf("  Package %s is not installed.\n", name)
+			continue
+		}
+		if p.Pinned {
+			return fmt.Errorf("package %s is pinned; unpin it first", name)
+		}
+
+		if err := ins.removeOne(p, purge); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (ins *Installer) removeOne(p *state.Package, purge bool) error {
+	manifest := &pkg.Manifest{
+		Name:    p.Name,
+		Version: p.Version,
+	}
+
+	// Get installed files
+	files, err := ins.db.GetFilesForPackage(p.Name)
+	if err != nil {
+		return err
+	}
+
+	// Run prerm
+	if manifest.Scripts.PreRm != "" {
+		runScript(manifest.Scripts.PreRm, "prerm", p.Name)
+	}
+
+	// Remove files
+	for _, f := range files {
+		if err := os.Remove(f.Path); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("  Warning: could not remove %s: %v\n", f.Path, err)
+		}
+		ins.db.RemoveFile(f.Path)
+	}
+
+	// Run postrm
+	if manifest.Scripts.PostRm != "" {
+		runScript(manifest.Scripts.PostRm, "postrm", p.Name)
+	}
+
+	if err := ins.db.RemovePackage(p.Name); err != nil {
+		return err
+	}
+
+	if err := world.Remove(p.Name); err != nil {
+		fmt.Printf("  Warning: could not update world file: %v\n", err)
+	}
+
+	fmt.Printf("  ✓ Removed %s %s\n", p.Name, p.Version)
+	return nil
+}
+
+// Upgrade upgrades the given packages (or all if empty).
+func (ins *Installer) Upgrade(names []string) error {
+	if len(names) == 0 {
+		pkgs, err := ins.db.ListPackages()
+		if err != nil {
+			return err
+		}
+		for _, p := range pkgs {
+			names = append(names, p.Name)
+		}
+	}
+
+	var toUpgrade []string
+	for _, name := range names {
+		installed, err := ins.db.GetPackage(name)
+		if err != nil || installed == nil {
+			continue
+		}
+		if installed.Pinned {
+			fmt.Printf("  Skipping %s (pinned)\n", name)
+			continue
+		}
+
+		available, err := ins.client.FindPackage(name)
+		if err != nil {
+			continue
+		}
+		if available.Meta.Custom == nil {
+			continue
+		}
+
+		a := pkg.ParseSemVer(available.Meta.Custom.Version)
+		b := pkg.ParseSemVer(installed.Version)
+		if a.Compare(b) > 0 {
+			toUpgrade = append(toUpgrade, name)
+			fmt.Printf("  %s: %s -> %s\n", name, installed.Version, available.Meta.Custom.Version)
+		}
+	}
+
+	if len(toUpgrade) == 0 {
+		fmt.Println("All packages are up to date.")
+		return nil
+	}
+
+	return ins.Install(toUpgrade, false)
+}
+
+// AutoRemove removes automatically installed packages no longer needed.
+func (ins *Installer) AutoRemove() error {
+	pkgs, err := ins.db.ListPackages()
+	if err != nil {
+		return err
+	}
+
+	// Build set of needed auto packages (those depended on by non-auto packages)
+	needed := make(map[string]bool)
+	for _, p := range pkgs {
+		if !p.Auto {
+			for _, dep := range p.Depends {
+				d := pkg.ParseDep(dep)
+				needed[d.Name] = true
+			}
+		}
+	}
+
+	var removed int
+	for _, p := range pkgs {
+		if p.Auto && !needed[p.Name] {
+			fmt.Printf("  Removing auto package: %s\n", p.Name)
+			if err := ins.removeOne(p, false); err != nil {
+				fmt.Printf("  Error removing %s: %v\n", p.Name, err)
+			} else {
+				removed++
+			}
+		}
+	}
+
+	if removed == 0 {
+		fmt.Println("Nothing to autoremove.")
+	}
+	return nil
+}
+
+// Verify verifies installed files against their recorded hashes.
+func (ins *Installer) Verify() error {
+	pkgs, err := ins.db.ListPackages()
+	if err != nil {
+		return err
+	}
+
+	ok := true
+	for _, p := range pkgs {
+		files, err := ins.db.GetFilesForPackage(p.Name)
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			h, err := fileHash(f.Path)
+			if os.IsNotExist(err) {
+				fmt.Printf("  MISSING  %s (from %s)\n", f.Path, p.Name)
+				ok = false
+				continue
+			}
+			if err != nil {
+				fmt.Printf("  ERROR    %s: %v\n", f.Path, err)
+				ok = false
+				continue
+			}
+			if h != f.Hash {
+				fmt.Printf("  MODIFIED %s (from %s)\n", f.Path, p.Name)
+				ok = false
+			}
+		}
+	}
+	if ok {
+		fmt.Println("✓ All installed files verified successfully.")
+	}
+	return nil
+}
+
+// Doctor checks system health.
+func (ins *Installer) Doctor() error {
+	issues := 0
+
+	pkgs, err := ins.db.ListPackages()
+	if err != nil {
+		return err
+	}
+
+	pkgMap := make(map[string]*state.Package)
+	for _, p := range pkgs {
+		pkgMap[p.Name] = p
+		for _, prov := range p.Provides {
+			pkgMap[prov] = p
+		}
+	}
+
+	// Check broken deps
+	for _, p := range pkgs {
+		for _, dep := range p.Depends {
+			d := pkg.ParseDep(dep)
+			installed, ok := pkgMap[d.Name]
+			if !ok {
+				fmt.Printf("  ✗ Broken dependency: %s requires %s (not installed)\n", p.Name, dep)
+				issues++
+				continue
+			}
+			if !pkg.SatisfiesDep(installed.Version, d) {
+				fmt.Printf("  ✗ Version mismatch: %s requires %s, installed %s\n", p.Name, dep, installed.Version)
+				issues++
+			}
+		}
+	}
+
+	// Check missing files
+	for _, p := range pkgs {
+		files, _ := ins.db.GetFilesForPackage(p.Name)
+		for _, f := range files {
+			if _, err := os.Stat(f.Path); os.IsNotExist(err) {
+				fmt.Printf("  ✗ Missing file: %s (from %s)\n", f.Path, p.Name)
+				issues++
+			}
+		}
+	}
+
+	// Check TUF metadata expiry
+	repos, _ := ins.db.ListRepos()
+	for _, r := range repos {
+		tsData, _, _ := ins.db.GetTUFMeta(r.Name, "timestamp")
+		if tsData == nil {
+			fmt.Printf("  ✗ No TUF metadata for repo %s (run 'dimsim update')\n", r.Name)
+			issues++
+		}
+	}
+
+	if issues == 0 {
+		fmt.Println("✓ System is healthy.")
+	} else {
+		fmt.Printf("  Found %d issue(s).\n", issues)
+	}
+	return nil
+}
+
+// --- dependency resolution ---
+
+type planItem struct {
+	Name     string
+	Version  string
+	Repo     string
+	Filename string
+	Meta     repo.TUFTargetMeta
+}
+
+func (ins *Installer) resolveDeps(names []string) ([]planItem, error) {
+	resolved := make(map[string]planItem)
+	var order []string
+
+	var resolve func(name string) error
+	resolve = func(name string) error {
+		if _, ok := resolved[name]; ok {
+			return nil
+		}
+
+		// Already installed?
+		installed, err := ins.db.GetPackage(name)
+		if err != nil {
+			return err
+		}
+		// If already installed and we're not explicitly asking to install it, skip
+		// (only skip if it's not in the explicit list - handled by caller marking auto)
+		if installed != nil {
+			alreadyExplicit := false
+			for _, n := range names {
+				if n == name {
+					alreadyExplicit = true
+					break
+				}
+			}
+			if !alreadyExplicit {
+				return nil
+			}
+		}
+
+		result, err := ins.client.FindPackage(name)
+		if err != nil {
+			if installed != nil {
+				return nil // already installed, dep satisfied
+			}
+			return fmt.Errorf("cannot find package %s: %w", name, err)
+		}
+
+		if result.Meta.Custom == nil {
+			return fmt.Errorf("package %s has no metadata", name)
+		}
+
+		// Resolve transitive deps first
+		for _, dep := range result.Meta.Custom.Depends {
+			d := pkg.ParseDep(dep)
+			if err := resolve(d.Name); err != nil {
+				return err
+			}
+		}
+
+		resolved[name] = planItem{
+			Name:     name,
+			Version:  result.Meta.Custom.Version,
+			Repo:     result.Repo,
+			Filename: result.Filename,
+			Meta:     result.Meta,
+		}
+		order = append(order, name)
+		return nil
+	}
+
+	for _, name := range names {
+		if err := resolve(name); err != nil {
+			return nil, err
+		}
+	}
+
+	var plan []planItem
+	for _, name := range order {
+		plan = append(plan, resolved[name])
+	}
+	return plan, nil
+}
+
+func (ins *Installer) checkReverseDeps(name string) error {
+	pkgs, err := ins.db.ListPackages()
+	if err != nil {
+		return err
+	}
+	var dependents []string
+	for _, p := range pkgs {
+		if p.Name == name {
+			continue
+		}
+		for _, dep := range p.Depends {
+			d := pkg.ParseDep(dep)
+			if d.Name == name {
+				dependents = append(dependents, p.Name)
+				break
+			}
+		}
+	}
+	if len(dependents) > 0 {
+		return fmt.Errorf("cannot remove %s: required by %s", name, strings.Join(dependents, ", "))
+	}
+	return nil
+}
+
+// --- backup helpers ---
+
+type backup struct {
+	original string
+	backupTo string
+}
+
+func backupFile(path string) (backup, error) {
+	backupPath := path + ".dimsim-backup"
+	if err := copyFile(path, backupPath); err != nil {
+		return backup{}, err
+	}
+	return backup{original: path, backupTo: backupPath}, nil
+}
+
+func (b backup) restore() {
+	if b.backupTo == "" {
+		return
+	}
+	os.Rename(b.backupTo, b.original)
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	stat, err := in.Stat()
+	if err != nil {
+		return err
+	}
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, stat.Mode())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	// Cross-device move
+	if err := copyFile(src, dst); err != nil {
+		return err
+	}
+	return os.Remove(src)
+}
+
+func fileHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func runScript(script, name, pkgName string) error {
+	tmpFile := filepath.Join(state.StagingDir, fmt.Sprintf("%s-%s.sh", pkgName, name))
+	if err := os.WriteFile(tmpFile, []byte(script), 0755); err != nil {
+		return fmt.Errorf("write script: %w", err)
+	}
+	defer os.Remove(tmpFile)
+
+	cmd := exec.Command("/bin/sh", tmpFile)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
