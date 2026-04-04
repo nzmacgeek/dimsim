@@ -1,0 +1,9 @@
+#!/bin/bash
+# Post-removal script
+# Called after files are removed.
+set -e
+
+# Add your post-removal steps here.
+# Example: remove users, clean up data, etc.
+
+exit 0

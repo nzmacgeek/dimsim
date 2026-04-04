@@ -43,13 +43,17 @@
 *.pdb
 
 # Kernel Module Compile Results
-*.mod*
+*.mod.c
+*.mod.o
 *.cmd
 .tmp_versions/
 modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Go build artifacts
+bin/
 
 # debug information files
 *.dwo

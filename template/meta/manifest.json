@@ -1,0 +1,14 @@
+{
+  "name": "example-package",
+  "version": "0.1.0",
+  "arch": "amd64",
+  "description": "An example package for BlueyOS",
+  "depends": [],
+  "recommends": [],
+  "conflicts": [],
+  "provides": [],
+  "maintainer": "Your Name <your@email.com>",
+  "homepage": "https://example.com/example-package",
+  "files": [],
+  "scripts": {}
+}

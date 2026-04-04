@@ -1,0 +1,9 @@
+#!/bin/bash
+# Pre-installation script
+# Called before files are placed.
+set -e
+
+# Add your pre-installation steps here.
+# Example: create users, stop services, etc.
+
+exit 0
