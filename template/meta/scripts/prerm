@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Pre-removal script
 # Called before files are removed.
 set -e

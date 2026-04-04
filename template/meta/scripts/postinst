@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Post-installation script
 # Called after files are placed.
 set -e

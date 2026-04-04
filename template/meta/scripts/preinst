@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Pre-installation script
 # Called before files are placed.
 set -e
