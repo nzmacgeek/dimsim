@@ -135,9 +135,8 @@ func (c *Client) refreshTUF(r *state.Repo) error {
 	}
 
 	var snap *TUFSnapshotSigned
-	var snapData []byte
 	if needsSnap {
-		snapData, err = c.fetch(r.URL + "/snapshot.json")
+		snapData, err := c.fetch(r.URL + "/snapshot.json")
 		if err != nil {
 			return fmt.Errorf("fetch snapshot.json: %w", err)
 		}
@@ -156,9 +155,7 @@ func (c *Client) refreshTUF(r *state.Repo) error {
 		if err != nil {
 			return fmt.Errorf("parse cached snapshot: %w", err)
 		}
-		snapData = cachedSnap
 	}
-	_ = snapData
 
 	// 4. Check if targets.json needs update
 	targetsRef, ok := snap.Meta["targets.json"]

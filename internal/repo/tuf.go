@@ -128,7 +128,7 @@ func VerifyTUFSignatures(envelope *TUFSigned, keys map[string]TUFKey, role TUFRo
 			continue
 		}
 
-		if key.KeyType != "ed25519" && key.Scheme != "ed25519" {
+		if key.KeyType != "ed25519" || key.Scheme != "ed25519" {
 			continue
 		}
 
