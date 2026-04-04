@@ -5,6 +5,10 @@ This guide covers day-to-day package management on BlueyOS using `dimsim`.
 > **Note**: most commands that modify system state require root privileges because
 > they write to `/` and `/var/lib/dimsim/`. Run them with `sudo` or as root.
 
+> **Offline installs**: to install packages into a non-booted target rootfs
+> (e.g. when provisioning a disk image), pass `--root <dir>` to any command.
+> See [Offline / Target-Root Install](./offline-install.md) for the full guide.
+
 ---
 
 ## First-time setup

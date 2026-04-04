@@ -9,6 +9,7 @@ A package manager for [BlueyOS](https://github.com/nzmacgeek/biscuits) — an im
 | [Creating a Package](docs/creating-a-package.md) | Build a `.dpk` from scratch with `dpkbuild` |
 | [Repository Setup](docs/repository-setup.md) | Create and maintain a TUF-signed repository |
 | [Package Management](docs/package-management.md) | Install, remove, upgrade, and maintain packages |
+| [Offline / Target-Root Install](docs/offline-install.md) | Provision packages into a non-booted BlueyOS rootfs |
 
 ## Binaries
 

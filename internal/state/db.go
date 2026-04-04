@@ -51,13 +51,27 @@ type FileRecord struct {
 
 // Open opens (or creates) the state database, creating required directories.
 func Open() (*DB, error) {
+	return OpenAt("")
+}
+
+// OpenAt opens (or creates) the state database rooted at rootDir.
+// When rootDir is empty or "/" the standard system paths are used.
+// This is used for offline installs into a non-booted target filesystem.
+func OpenAt(rootDir string) (*DB, error) {
+	rooted := func(p string) string {
+		if rootDir == "" || rootDir == "/" {
+			return p
+		}
+		return rootDir + p
+	}
+
 	for _, dir := range []string{StateDir, CacheDir, StagingDir} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, fmt.Errorf("create state dir %s: %w", dir, err)
+		if err := os.MkdirAll(rooted(dir), 0755); err != nil {
+			return nil, fmt.Errorf("create state dir %s: %w", rooted(dir), err)
 		}
 	}
 
-	db, err := sql.Open("sqlite", DBPath)
+	db, err := sql.Open("sqlite", rooted(DBPath))
 	if err != nil {
 		return nil, fmt.Errorf("open state db: %w", err)
 	}

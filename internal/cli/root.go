@@ -19,14 +19,30 @@ func Execute() {
 	}
 }
 
-// withDB opens the state DB, calls f, and closes it.
+// withDB opens the state DB at the system default path, calls f, then closes it.
 func withDB(f func(db *state.DB) error) error {
-	db, err := state.Open()
+	return withDBAt("", f)
+}
+
+// withDBAt opens (or creates) the state DB rooted at rootDir, calls f, then
+// closes it. When rootDir is empty the standard system paths are used.
+func withDBAt(rootDir string, f func(db *state.DB) error) error {
+	db, err := state.OpenAt(rootDir)
 	if err != nil {
-		return fmt.Errorf("open state database: %w\nHint: ensure /var/lib/dimsim/ is writable or run as root", err)
+		hint := "/var/lib/dimsim/"
+		if rootDir != "" {
+			hint = rootDir + hint
+		}
+		return fmt.Errorf("open state database: %w\nHint: ensure %s is writable or run as root", err, hint)
 	}
 	defer db.Close()
 	return f(db)
+}
+
+// rootDirFromCmd reads the --root persistent flag value from the root command.
+func rootDirFromCmd(cmd *cobra.Command) string {
+	v, _ := cmd.Root().PersistentFlags().GetString("root")
+	return v
 }
 
 func newRootCmd() *cobra.Command {
@@ -36,6 +52,10 @@ func newRootCmd() *cobra.Command {
 		Long:         "dimsim is the package manager for BlueyOS, providing TUF-secured package management.",
 		SilenceUsage: true,
 	}
+
+	// --root makes every subcommand operate on a target root filesystem
+	// rather than the running system. Useful for offline provisioning.
+	cmd.PersistentFlags().String("root", "", "Operate on a target root filesystem (offline mode)")
 
 	cmd.AddCommand(buildRepoCmd())
 	cmd.AddCommand(buildUpdateCmd())
@@ -67,7 +87,7 @@ func buildRepoCmd() *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, _ := cmd.Flags().GetInt("priority")
-			return withDB(func(db *state.DB) error {
+			return withDBAt(rootDirFromCmd(cmd), func(db *state.DB) error {
 				existing, err := db.GetRepo(args[0])
 				if err != nil {
 					return err
@@ -88,7 +108,7 @@ func buildRepoCmd() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withDB(func(db *state.DB) error {
+			return withDBAt(rootDirFromCmd(cmd), func(db *state.DB) error {
 				return newRepoListCmd(db).RunE(cmd, args)
 			})
 		},
@@ -101,7 +121,7 @@ func buildRepoCmd() *cobra.Command {
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withDB(func(db *state.DB) error {
+			return withDBAt(rootDirFromCmd(cmd), func(db *state.DB) error {
 				return newRepoRemoveCmd(db).RunE(cmd, args)
 			})
 		},
@@ -118,7 +138,7 @@ func buildUpdateCmd() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withDB(func(db *state.DB) error {
+			return withDBAt(rootDirFromCmd(cmd), func(db *state.DB) error {
 				return newUpdateCmd(db).RunE(cmd, args)
 			})
 		},
@@ -132,7 +152,7 @@ func buildSearchCmd() *cobra.Command {
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withDB(func(db *state.DB) error {
+			return withDBAt(rootDirFromCmd(cmd), func(db *state.DB) error {
 				return newSearchCmd(db).RunE(cmd, args)
 			})
 		},
@@ -146,7 +166,7 @@ func buildInfoCmd() *cobra.Command {
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withDB(func(db *state.DB) error {
+			return withDBAt(rootDirFromCmd(cmd), func(db *state.DB) error {
 				return newInfoCmd(db).RunE(cmd, args)
 			})
 		},
@@ -160,9 +180,15 @@ func buildInstallCmd() *cobra.Command {
 		Args:         cobra.MinimumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withDB(func(db *state.DB) error {
+			rootDir := rootDirFromCmd(cmd)
+			return withDBAt(rootDir, func(db *state.DB) error {
+				if rootDir != "" {
+					if err := install.ValidateBlueyOSRoot(rootDir); err != nil {
+						return err
+					}
+				}
 				client := repo.NewClient(db)
-				ins := install.New(db, client)
+				ins := install.NewOffline(rootDir, db, client)
 				return ins.Install(args, false)
 			})
 		},
@@ -179,9 +205,10 @@ func buildRemoveCmd() *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, _ := cmd.Flags().GetBool("purge")
-			return withDB(func(db *state.DB) error {
+			rootDir := rootDirFromCmd(cmd)
+			return withDBAt(rootDir, func(db *state.DB) error {
 				client := repo.NewClient(db)
-				ins := install.New(db, client)
+				ins := install.NewOffline(rootDir, db, client)
 				return ins.Remove(args, p)
 			})
 		},
@@ -196,9 +223,15 @@ func buildUpgradeCmd() *cobra.Command {
 		Short:        "Upgrade installed packages",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withDB(func(db *state.DB) error {
+			rootDir := rootDirFromCmd(cmd)
+			return withDBAt(rootDir, func(db *state.DB) error {
+				if rootDir != "" {
+					if err := install.ValidateBlueyOSRoot(rootDir); err != nil {
+						return err
+					}
+				}
 				client := repo.NewClient(db)
-				ins := install.New(db, client)
+				ins := install.NewOffline(rootDir, db, client)
 				return ins.Upgrade(args)
 			})
 		},
@@ -212,9 +245,10 @@ func buildAutoremoveCmd() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withDB(func(db *state.DB) error {
+			rootDir := rootDirFromCmd(cmd)
+			return withDBAt(rootDir, func(db *state.DB) error {
 				client := repo.NewClient(db)
-				ins := install.New(db, client)
+				ins := install.NewOffline(rootDir, db, client)
 				return ins.AutoRemove()
 			})
 		},
@@ -228,9 +262,10 @@ func buildVerifyCmd() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withDB(func(db *state.DB) error {
+			rootDir := rootDirFromCmd(cmd)
+			return withDBAt(rootDir, func(db *state.DB) error {
 				client := repo.NewClient(db)
-				ins := install.New(db, client)
+				ins := install.NewOffline(rootDir, db, client)
 				return ins.Verify()
 			})
 		},
@@ -244,7 +279,7 @@ func buildPinCmd() *cobra.Command {
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withDB(func(db *state.DB) error {
+			return withDBAt(rootDirFromCmd(cmd), func(db *state.DB) error {
 				if err := db.SetPinned(args[0], true); err != nil {
 					return err
 				}
@@ -262,7 +297,7 @@ func buildUnpinCmd() *cobra.Command {
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withDB(func(db *state.DB) error {
+			return withDBAt(rootDirFromCmd(cmd), func(db *state.DB) error {
 				if err := db.SetPinned(args[0], false); err != nil {
 					return err
 				}
@@ -280,9 +315,10 @@ func buildDoctorCmd() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withDB(func(db *state.DB) error {
+			rootDir := rootDirFromCmd(cmd)
+			return withDBAt(rootDir, func(db *state.DB) error {
 				client := repo.NewClient(db)
-				ins := install.New(db, client)
+				ins := install.NewOffline(rootDir, db, client)
 				return ins.Doctor()
 			})
 		},

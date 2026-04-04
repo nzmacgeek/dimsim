@@ -288,14 +288,21 @@ func (c *Client) FindPackage(name string) (*SearchResult, error) {
 	return nil, fmt.Errorf("package not found: %s", name)
 }
 
-// DownloadPackage downloads a package file to the cache directory and verifies its hash.
+// DownloadPackage downloads a package file to the default cache directory and verifies its hash.
 func (c *Client) DownloadPackage(repoName, filename string, meta TUFTargetMeta) (string, error) {
+	return c.DownloadPackageTo(repoName, filename, meta, state.CacheDir)
+}
+
+// DownloadPackageTo downloads a package file to cacheDir and verifies its hash.
+// This variant is used for offline installs where the cache lives inside the
+// target rootfs rather than /var/lib/dimsim/cache.
+func (c *Client) DownloadPackageTo(repoName, filename string, meta TUFTargetMeta, cacheDir string) (string, error) {
 	r, err := c.db.GetRepo(repoName)
 	if err != nil || r == nil {
 		return "", fmt.Errorf("repo not found: %s", repoName)
 	}
 
-	destPath := filepath.Join(state.CacheDir, filename)
+	destPath := filepath.Join(cacheDir, filename)
 
 	// Check if already cached and valid
 	if data, err := os.ReadFile(destPath); err == nil {
@@ -318,7 +325,7 @@ func (c *Client) DownloadPackage(repoName, filename string, meta TUFTargetMeta) 
 		return "", fmt.Errorf("hash verification failed for %s: %w", filename, err)
 	}
 
-	if err := os.MkdirAll(state.CacheDir, 0755); err != nil {
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return "", fmt.Errorf("create cache dir: %w", err)
 	}
 

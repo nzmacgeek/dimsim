@@ -19,13 +19,49 @@ import (
 
 // Installer handles package installation, removal, and upgrade.
 type Installer struct {
-	db     *state.DB
-	client *repo.Client
+	db      *state.DB
+	client  *repo.Client
+	// RootDir, when non-empty, makes all file operations relative to this
+	// directory. Used for offline installs into a non-booted target system.
+	RootDir string
 }
 
-// New creates a new Installer.
+// New creates a new Installer for the running system.
 func New(db *state.DB, client *repo.Client) *Installer {
 	return &Installer{db: db, client: client}
+}
+
+// NewOffline creates an Installer that operates on a target rootfs at rootDir.
+// File operations are performed relative to rootDir; lifecycle scripts are
+// staged as claw firstboot services instead of being executed immediately.
+func NewOffline(rootDir string, db *state.DB, client *repo.Client) *Installer {
+	return &Installer{db: db, client: client, RootDir: rootDir}
+}
+
+// isOffline returns true when the installer is operating on a target rootfs.
+func (ins *Installer) isOffline() bool { return ins.RootDir != "" }
+
+// rootPath prepends ins.RootDir to the path when in offline mode.
+func (ins *Installer) rootPath(p string) string {
+	if ins.RootDir == "" {
+		return p
+	}
+	return filepath.Join(ins.RootDir, p)
+}
+
+// worldFilePath returns the path to the world file (possibly rooted).
+func (ins *Installer) worldFilePath() string {
+	return ins.rootPath(state.WorldFile)
+}
+
+// stagingDir returns the staging directory (possibly rooted).
+func (ins *Installer) stagingDir() string {
+	return ins.rootPath(state.StagingDir)
+}
+
+// cacheDir returns the cache directory (possibly rooted).
+func (ins *Installer) cacheDir() string {
+	return ins.rootPath(state.CacheDir)
 }
 
 // Install installs the given packages with full dependency resolution.
@@ -54,6 +90,10 @@ func (ins *Installer) Install(names []string, auto bool) error {
 		fmt.Printf("  %s %s%s\n", item.Name, item.Version, marker)
 	}
 
+	if ins.isOffline() {
+		fmt.Printf("  (offline mode — scripts will be staged for first boot via claw)\n")
+	}
+
 	// Download all packages first
 	type downloadedPkg struct {
 		planItem planItem
@@ -64,7 +104,7 @@ func (ins *Installer) Install(names []string, auto bool) error {
 
 	for _, item := range plan {
 		fmt.Printf("  Downloading %s-%s...\n", item.Name, item.Version)
-		dpkPath, err := ins.client.DownloadPackage(item.Repo, item.Filename, item.Meta)
+		dpkPath, err := ins.client.DownloadPackageTo(item.Repo, item.Filename, item.Meta, ins.cacheDir())
 		if err != nil {
 			return fmt.Errorf("download %s: %w", item.Name, err)
 		}
@@ -84,7 +124,7 @@ func (ins *Installer) Install(names []string, auto bool) error {
 			pkgName := installed[i]
 			files, _ := ins.db.GetFilesForPackage(pkgName)
 			for _, f := range files {
-				os.Remove(f.Path)
+				os.Remove(ins.rootPath(f.Path))
 				ins.db.RemoveFile(f.Path)
 			}
 			ins.db.RemovePackage(pkgName)
@@ -104,82 +144,130 @@ func (ins *Installer) Install(names []string, auto bool) error {
 		}
 		isAuto := auto && !isExplicit
 
-		stagingDir := filepath.Join(state.StagingDir, d.manifest.Name)
-		if err := os.MkdirAll(stagingDir, 0755); err != nil {
+		pkgStagingDir := filepath.Join(ins.stagingDir(), d.manifest.Name)
+		if err := os.MkdirAll(pkgStagingDir, 0755); err != nil {
 			rollback()
 			return fmt.Errorf("create staging dir: %w", err)
 		}
 
 		// Extract to staging
-		extracted, err := pkg.ExtractDpkPayload(d.dpkPath, stagingDir)
+		extracted, err := pkg.ExtractDpkPayload(d.dpkPath, pkgStagingDir)
 		if err != nil {
-			os.RemoveAll(stagingDir)
+			os.RemoveAll(pkgStagingDir)
 			rollback()
 			return fmt.Errorf("extract %s: %w", d.manifest.Name, err)
 		}
 
-		// Run preinst
-		if d.manifest.Scripts.PreInst != "" {
-			if err := runScript(d.manifest.Scripts.PreInst, "preinst", d.manifest.Name); err != nil {
-				os.RemoveAll(stagingDir)
-				rollback()
-				return fmt.Errorf("preinst for %s: %w", d.manifest.Name, err)
+		if ins.isOffline() {
+			// Offline: stage preinst as a claw firstboot service (runs before
+			// postinst on first boot, after claw-rootfs.target).
+			if d.manifest.Scripts.PreInst != "" {
+				if err := ins.stageFirstBootScript(
+					d.manifest.Name, "preinst",
+					d.manifest.Scripts.PreInst,
+					nil,
+				); err != nil {
+					os.RemoveAll(pkgStagingDir)
+					rollback()
+					return fmt.Errorf("stage preinst for %s: %w", d.manifest.Name, err)
+				}
+				fmt.Printf("  Staged preinst for %s as claw firstboot service\n", d.manifest.Name)
+			}
+		} else {
+			// Online: run preinst immediately
+			if d.manifest.Scripts.PreInst != "" {
+				if err := runScript(d.manifest.Scripts.PreInst, "preinst", d.manifest.Name); err != nil {
+					os.RemoveAll(pkgStagingDir)
+					rollback()
+					return fmt.Errorf("preinst for %s: %w", d.manifest.Name, err)
+				}
 			}
 		}
 
-		// Move files from staging to root
+		// Move files from staging to final destination (/ or rootDir/)
 		var pkgBackups []backup
 		var movedFiles []string
 
 		for _, src := range extracted {
-			rel, err := filepath.Rel(stagingDir, src)
+			rel, err := filepath.Rel(pkgStagingDir, src)
 			if err != nil {
 				continue
 			}
-			dest := "/" + filepath.ToSlash(rel)
+			// targetPath is the path on the TARGET system (no rootDir prefix).
+			targetPath := "/" + filepath.ToSlash(rel)
+			// destPath is the actual path on the HOST filesystem.
+			destPath := ins.rootPath(targetPath)
 
 			// Backup existing file
-			if _, err := os.Stat(dest); err == nil {
-				b, err := backupFile(dest)
+			if _, err := os.Stat(destPath); err == nil {
+				b, err := backupFile(destPath)
 				if err == nil {
 					pkgBackups = append(pkgBackups, b)
 				}
 			}
 
-			if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 				for _, b := range pkgBackups {
 					b.restore()
 				}
-				os.RemoveAll(stagingDir)
+				os.RemoveAll(pkgStagingDir)
 				rollback()
-				return fmt.Errorf("create parent dir for %s: %w", dest, err)
+				return fmt.Errorf("create parent dir for %s: %w", destPath, err)
 			}
 
-			if err := moveFile(src, dest); err != nil {
+			if err := moveFile(src, destPath); err != nil {
 				for _, b := range pkgBackups {
 					b.restore()
 				}
-				os.RemoveAll(stagingDir)
+				os.RemoveAll(pkgStagingDir)
 				rollback()
-				return fmt.Errorf("move file %s: %w", dest, err)
+				return fmt.Errorf("move file %s: %w", destPath, err)
 			}
-			movedFiles = append(movedFiles, dest)
+			// Store the TARGET path in the DB (not rooted), so it reads
+			// correctly when dimsim runs on the target system.
+			movedFiles = append(movedFiles, targetPath)
 		}
 
-		os.RemoveAll(stagingDir)
+		os.RemoveAll(pkgStagingDir)
 
-		// Run postinst
-		if d.manifest.Scripts.PostInst != "" {
-			if err := runScript(d.manifest.Scripts.PostInst, "postinst", d.manifest.Name); err != nil {
-				// Remove moved files and rollback
-				for _, f := range movedFiles {
-					os.Remove(f)
+		if ins.isOffline() {
+			// Offline: stage postinst as a claw firstboot service.
+			// If preinst was also staged, ensure postinst runs after it.
+			if d.manifest.Scripts.PostInst != "" {
+				var afterUnits []string
+				if d.manifest.Scripts.PreInst != "" {
+					afterUnits = append(afterUnits,
+						fmt.Sprintf("dimsim-preinst-%s", d.manifest.Name))
 				}
-				for _, b := range pkgBackups {
-					b.restore()
+				if err := ins.stageFirstBootScript(
+					d.manifest.Name, "postinst",
+					d.manifest.Scripts.PostInst,
+					afterUnits,
+				); err != nil {
+					for _, f := range movedFiles {
+						os.Remove(ins.rootPath(f))
+					}
+					for _, b := range pkgBackups {
+						b.restore()
+					}
+					rollback()
+					return fmt.Errorf("stage postinst for %s: %w", d.manifest.Name, err)
 				}
-				rollback()
-				return fmt.Errorf("postinst for %s: %w", d.manifest.Name, err)
+				fmt.Printf("  Staged postinst for %s as claw firstboot service\n", d.manifest.Name)
+			}
+		} else {
+			// Online: run postinst immediately
+			if d.manifest.Scripts.PostInst != "" {
+				if err := runScript(d.manifest.Scripts.PostInst, "postinst", d.manifest.Name); err != nil {
+					for _, f := range movedFiles {
+						os.Remove(f)
+					}
+					for _, b := range pkgBackups {
+						b.restore()
+					}
+					rollback()
+					return fmt.Errorf("postinst for %s: %w", d.manifest.Name, err)
+				}
 			}
 		}
 
@@ -202,11 +290,11 @@ func (ins *Installer) Install(names []string, auto bool) error {
 			return fmt.Errorf("record package %s: %w", d.manifest.Name, err)
 		}
 
-		// Record files
-		for _, f := range movedFiles {
-			h, _ := fileHash(f)
+		// Record files (using TARGET paths, no rootDir prefix)
+		for _, targetPath := range movedFiles {
+			h, _ := fileHash(ins.rootPath(targetPath))
 			ins.db.AddFile(state.FileRecord{
-				Path:    f,
+				Path:    targetPath,
 				Package: d.manifest.Name,
 				Hash:    h,
 			})
@@ -216,7 +304,7 @@ func (ins *Installer) Install(names []string, auto bool) error {
 
 		// Update world file for explicit installs
 		if !isAuto {
-			if err := world.Add(d.manifest.Name); err != nil {
+			if err := world.AddToFile(ins.worldFilePath(), d.manifest.Name); err != nil {
 				fmt.Printf("  Warning: could not update world file: %v\n", err)
 			}
 		}
@@ -260,33 +348,34 @@ func (ins *Installer) removeOne(p *state.Package, purge bool) error {
 	// Try to load the full manifest (including lifecycle scripts) from the
 	// cached .dpk. If the cache is gone, fall back to a bare manifest so that
 	// file removal still proceeds — we just won't run the scripts.
-	dpkPath := filepath.Join(state.CacheDir, fmt.Sprintf("%s-%s-%s.dpk", p.Name, p.Version, p.Arch))
+	dpkPath := filepath.Join(ins.cacheDir(), fmt.Sprintf("%s-%s-%s.dpk", p.Name, p.Version, p.Arch))
 	manifest, err := pkg.ReadDpkManifest(dpkPath)
 	if err != nil {
 		manifest = &pkg.Manifest{Name: p.Name, Version: p.Version}
 	}
 
-	// Get installed files
+	// Get installed files (paths are TARGET-relative, no rootDir prefix)
 	files, err := ins.db.GetFilesForPackage(p.Name)
 	if err != nil {
 		return err
 	}
 
-	// Run prerm
-	if manifest.Scripts.PreRm != "" {
+	// Run prerm (skipped in offline mode — scripts run on target boot)
+	if !ins.isOffline() && manifest.Scripts.PreRm != "" {
 		runScript(manifest.Scripts.PreRm, "prerm", p.Name)
 	}
 
 	// Remove files
 	for _, f := range files {
-		if err := os.Remove(f.Path); err != nil && !os.IsNotExist(err) {
+		actualPath := ins.rootPath(f.Path)
+		if err := os.Remove(actualPath); err != nil && !os.IsNotExist(err) {
 			fmt.Printf("  Warning: could not remove %s: %v\n", f.Path, err)
 		}
 		ins.db.RemoveFile(f.Path)
 	}
 
-	// Run postrm
-	if manifest.Scripts.PostRm != "" {
+	// Run postrm (skipped in offline mode)
+	if !ins.isOffline() && manifest.Scripts.PostRm != "" {
 		runScript(manifest.Scripts.PostRm, "postrm", p.Name)
 	}
 
@@ -294,7 +383,7 @@ func (ins *Installer) removeOne(p *state.Package, purge bool) error {
 		return err
 	}
 
-	if err := world.Remove(p.Name); err != nil {
+	if err := world.RemoveFromFile(ins.worldFilePath(), p.Name); err != nil {
 		fmt.Printf("  Warning: could not update world file: %v\n", err)
 	}
 
@@ -399,7 +488,8 @@ func (ins *Installer) Verify() error {
 			continue
 		}
 		for _, f := range files {
-			h, err := fileHash(f.Path)
+			actualPath := ins.rootPath(f.Path)
+			h, err := fileHash(actualPath)
 			if os.IsNotExist(err) {
 				fmt.Printf("  MISSING  %s (from %s)\n", f.Path, p.Name)
 				ok = false
@@ -460,7 +550,7 @@ func (ins *Installer) Doctor() error {
 	for _, p := range pkgs {
 		files, _ := ins.db.GetFilesForPackage(p.Name)
 		for _, f := range files {
-			if _, err := os.Stat(f.Path); os.IsNotExist(err) {
+			if _, err := os.Stat(ins.rootPath(f.Path)); os.IsNotExist(err) {
 				fmt.Printf("  ✗ Missing file: %s (from %s)\n", f.Path, p.Name)
 				issues++
 			}
@@ -664,6 +754,9 @@ func fileHash(path string) (string, error) {
 
 func runScript(script, name, pkgName string) error {
 	tmpFile := filepath.Join(state.StagingDir, fmt.Sprintf("%s-%s.sh", pkgName, name))
+	if err := os.MkdirAll(state.StagingDir, 0755); err != nil {
+		return fmt.Errorf("create staging dir: %w", err)
+	}
 	if err := os.WriteFile(tmpFile, []byte(script), 0755); err != nil {
 		return fmt.Errorf("write script: %w", err)
 	}
