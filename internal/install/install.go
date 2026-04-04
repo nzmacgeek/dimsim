@@ -257,9 +257,13 @@ func (ins *Installer) Remove(names []string, purge bool) error {
 }
 
 func (ins *Installer) removeOne(p *state.Package, purge bool) error {
-	manifest := &pkg.Manifest{
-		Name:    p.Name,
-		Version: p.Version,
+	// Try to load the full manifest (including lifecycle scripts) from the
+	// cached .dpk. If the cache is gone, fall back to a bare manifest so that
+	// file removal still proceeds — we just won't run the scripts.
+	dpkPath := filepath.Join(state.CacheDir, fmt.Sprintf("%s-%s-%s.dpk", p.Name, p.Version, p.Arch))
+	manifest, err := pkg.ReadDpkManifest(dpkPath)
+	if err != nil {
+		manifest = &pkg.Manifest{Name: p.Name, Version: p.Version}
 	}
 
 	// Get installed files

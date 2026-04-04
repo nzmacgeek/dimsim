@@ -2,6 +2,14 @@
 
 A package manager for [BlueyOS](https://github.com/nzmacgeek/biscuits) — an imaginary Linux-like operating system whose userland consists of **bash**, **musl-libc**, and **claw** (init).
 
+## Documentation
+
+| Guide | Description |
+|-------|-------------|
+| [Creating a Package](docs/creating-a-package.md) | Build a `.dpk` from scratch with `dpkbuild` |
+| [Repository Setup](docs/repository-setup.md) | Create and maintain a TUF-signed repository |
+| [Package Management](docs/package-management.md) | Install, remove, upgrade, and maintain packages |
+
 ## Binaries
 
 | Binary | Purpose |
