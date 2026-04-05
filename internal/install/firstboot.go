@@ -24,13 +24,28 @@ func ValidateBlueyOSRoot(rootDir string) error {
 		{"/bin/bash", "missing /bin/bash (required by BlueyOS — no /bin/sh)"},
 	}
 	for _, c := range checks {
-		full := filepath.Join(rootDir, c.path)
+		full := filepath.Join(rootDir, strings.TrimLeft(c.path, string(filepath.Separator)))
 		if _, err := os.Stat(full); os.IsNotExist(err) {
 			return fmt.Errorf(
 				"target root %q does not appear to be a BlueyOS system:\n  %s",
 				rootDir, c.hint,
 			)
 		}
+	}
+	return nil
+}
+
+// validateBlueyOSRootNoBash checks that rootDir has /etc/claw/ but does NOT
+// require /bin/bash. Used when all packages being installed are marked as core,
+// allowing foundational packages (such as bash itself) to be installed into a
+// fresh sysroot before bash is present.
+func validateBlueyOSRootNoBash(rootDir string) error {
+	full := filepath.Join(rootDir, strings.TrimLeft("/etc/claw", string(filepath.Separator)))
+	if _, err := os.Stat(full); os.IsNotExist(err) {
+		return fmt.Errorf(
+			"target root %q does not appear to be a BlueyOS system:\n  missing /etc/claw/ (claw init system config directory)",
+			rootDir,
+		)
 	}
 	return nil
 }

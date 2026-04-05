@@ -182,11 +182,6 @@ func buildInstallCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rootDir := rootDirFromCmd(cmd)
 			return withDBAt(rootDir, func(db *state.DB) error {
-				if rootDir != "" {
-					if err := install.ValidateBlueyOSRoot(rootDir); err != nil {
-						return err
-					}
-				}
 				client := repo.NewClient(db)
 				ins := install.NewOffline(rootDir, db, client)
 				return ins.Install(args, false)
@@ -225,11 +220,6 @@ func buildUpgradeCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rootDir := rootDirFromCmd(cmd)
 			return withDBAt(rootDir, func(db *state.DB) error {
-				if rootDir != "" {
-					if err := install.ValidateBlueyOSRoot(rootDir); err != nil {
-						return err
-					}
-				}
 				client := repo.NewClient(db)
 				ins := install.NewOffline(rootDir, db, client)
 				return ins.Upgrade(args)
