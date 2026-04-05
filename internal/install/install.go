@@ -92,6 +92,13 @@ func (ins *Installer) shouldSkipScriptStaging(m *pkg.Manifest) bool {
 	return m.Core && !ins.bashInRoot()
 }
 
+// downloadedPkg holds a resolved and downloaded package ready for installation.
+type downloadedPkg struct {
+	planItem planItem
+	dpkPath  string
+	manifest *pkg.Manifest
+}
+
 // Install installs the given packages with full dependency resolution.
 // If auto is true, packages are marked as automatically installed.
 func (ins *Installer) Install(names []string, auto bool) error {
@@ -123,11 +130,6 @@ func (ins *Installer) Install(names []string, auto bool) error {
 	}
 
 	// Download all packages first
-	type downloadedPkg struct {
-		planItem planItem
-		dpkPath  string
-		manifest *pkg.Manifest
-	}
 	var downloaded []downloadedPkg
 
 	for _, item := range plan {
@@ -166,7 +168,223 @@ func (ins *Installer) Install(names []string, auto bool) error {
 		}
 	}
 
-	// Transactional install
+	return ins.installPackages(downloaded, names, auto)
+}
+
+// InstallFiles installs packages from local .dpk file paths, bypassing TUF
+// repository verification. A warning is always printed because signature
+// verification is skipped.
+//
+// Dependencies declared in the local packages are satisfied in order of
+// preference:
+//  1. Packages that are already installed on the system.
+//  2. Other .dpk files provided in paths (they satisfy each other's deps).
+//  3. Packages downloaded from a configured repository.
+//
+// If a required dependency cannot be found through any of these means, an
+// error is returned with a hint on how to supply it.
+func (ins *Installer) InstallFiles(paths []string, auto bool) error {
+	// --- 1. Read all manifests --------------------------------------------------
+	type localFile struct {
+		path     string
+		manifest *pkg.Manifest
+	}
+	var locals []localFile
+	// localByName maps a package name (or virtual "provides" name) to the
+	// local file that provides it.
+	localByName := make(map[string]*localFile)
+
+	for _, p := range paths {
+		absPath, err := filepath.Abs(p)
+		if err != nil {
+			return fmt.Errorf("resolve path %s: %w", p, err)
+		}
+		m, err := pkg.ReadDpkManifest(absPath)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", p, err)
+		}
+		locals = append(locals, localFile{path: absPath, manifest: m})
+		lf := &locals[len(locals)-1]
+		localByName[m.Name] = lf
+		for _, prov := range m.Provides {
+			if _, exists := localByName[prov]; !exists {
+				localByName[prov] = lf
+			}
+		}
+	}
+
+	// --- 2. Resolve dependencies (topological order) ----------------------------
+	resolved := make(map[string]downloadedPkg)
+	var order []string
+
+	var resolve func(name string) error
+	resolve = func(name string) error {
+		if _, ok := resolved[name]; ok {
+			return nil
+		}
+
+		// Already installed and not being explicitly (re)installed from a file?
+		installed, err := ins.db.GetPackage(name)
+		if err != nil {
+			return err
+		}
+		if installed != nil {
+			if _, explicit := localByName[name]; !explicit {
+				return nil // dependency satisfied by the installed version
+			}
+		}
+
+		// Provided by one of the local files passed by the user?
+		if lf, ok := localByName[name]; ok {
+			m := lf.manifest
+			// Resolve this package's own dependencies first.
+			for _, dep := range m.Depends {
+				d := pkg.ParseDep(dep)
+				if err := resolve(d.Name); err != nil {
+					return err
+				}
+			}
+			resolved[name] = downloadedPkg{
+				planItem: planItem{Name: m.Name, Version: m.Version},
+				dpkPath:  lf.path,
+				manifest: m,
+			}
+			order = append(order, name)
+			return nil
+		}
+
+		// Not available locally — try a configured repository.
+		result, err := ins.client.FindPackage(name)
+		if err != nil {
+			return fmt.Errorf(
+				"package %q is required but not installed and not available in any configured repository (hint: install it first or provide the .dpk file directly)",
+				name,
+			)
+		}
+		if result.Meta.Custom == nil {
+			return fmt.Errorf("package %q has no metadata in repository", name)
+		}
+		// Resolve repo package's deps before downloading it.
+		for _, dep := range result.Meta.Custom.Depends {
+			d := pkg.ParseDep(dep)
+			if err := resolve(d.Name); err != nil {
+				return err
+			}
+		}
+		fmt.Printf("  Downloading dependency %s-%s from %s...\n", name, result.Meta.Custom.Version, result.Repo)
+		dpkPath, err := ins.client.DownloadPackageTo(result.Repo, result.Filename, result.Meta, ins.cacheDir())
+		if err != nil {
+			return fmt.Errorf("download %s: %w", name, err)
+		}
+		manifest, err := pkg.ReadDpkManifest(dpkPath)
+		if err != nil {
+			return fmt.Errorf("read manifest %s: %w", name, err)
+		}
+		resolved[name] = downloadedPkg{
+			planItem: planItem{
+				Name:     name,
+				Version:  result.Meta.Custom.Version,
+				Repo:     result.Repo,
+				Filename: result.Filename,
+				Meta:     result.Meta,
+			},
+			dpkPath:  dpkPath,
+			manifest: manifest,
+		}
+		order = append(order, name)
+		return nil
+	}
+
+	for _, l := range locals {
+		if err := resolve(l.manifest.Name); err != nil {
+			return err
+		}
+	}
+
+	// --- 3. Build install list --------------------------------------------------
+	var downloaded []downloadedPkg
+	for _, name := range order {
+		downloaded = append(downloaded, resolved[name])
+	}
+
+	if len(downloaded) == 0 {
+		fmt.Println("Nothing to install.")
+		return nil
+	}
+
+	// --- 4. Print plan ----------------------------------------------------------
+	fmt.Println("Warning: packages installed from local files bypass TUF signature verification.")
+	fmt.Println("The following packages will be installed:")
+
+	explicitNames := make([]string, 0, len(locals))
+	for _, l := range locals {
+		explicitNames = append(explicitNames, l.manifest.Name)
+	}
+
+	for _, d := range downloaded {
+		marker := " [dependency]"
+		for _, n := range explicitNames {
+			if n == d.manifest.Name {
+				marker = " [local file]"
+				break
+			}
+		}
+		fmt.Printf("  %s %s%s\n", d.manifest.Name, d.manifest.Version, marker)
+	}
+	if ins.isOffline() {
+		fmt.Printf("  (offline mode — scripts will be staged for first boot via claw)\n")
+	}
+
+	// --- 5. Validate root -------------------------------------------------------
+	if ins.isOffline() {
+		allCore := true
+		for _, d := range downloaded {
+			if !d.manifest.Core {
+				allCore = false
+				break
+			}
+		}
+		if allCore {
+			if err := validateBlueyOSRootNoBash(ins.RootDir); err != nil {
+				return err
+			}
+		} else {
+			if err := ValidateBlueyOSRoot(ins.RootDir); err != nil {
+				return err
+			}
+		}
+	}
+
+	// --- 6. Copy local files into the cache ------------------------------------
+	// This mirrors what DownloadPackageTo does for repo packages, and lets
+	// removeOne find the .dpk later for lifecycle script execution.
+	if err := os.MkdirAll(ins.cacheDir(), 0755); err != nil {
+		return fmt.Errorf("create cache dir: %w", err)
+	}
+	for i := range downloaded {
+		d := &downloaded[i]
+		if d.planItem.Repo != "" {
+			continue // already in cache from the download step above
+		}
+		dest := filepath.Join(ins.cacheDir(), d.manifest.Filename())
+		if err := copyFile(d.dpkPath, dest); err != nil {
+			// Non-fatal: the package is already installed; the cache is only
+			// needed by removeOne to run lifecycle scripts during removal.
+			fmt.Printf("  Warning: could not cache %s: %v\n", d.manifest.Name, err)
+		} else {
+			d.dpkPath = dest
+		}
+	}
+
+	// --- 7. Transactional install -----------------------------------------------
+	return ins.installPackages(downloaded, explicitNames, auto)
+}
+
+// installPackages performs the transactional installation of a set of already-
+// downloaded packages. explicitNames is the set of package names that the user
+// directly requested (as opposed to those pulled in automatically as
+// dependencies).
+func (ins *Installer) installPackages(downloaded []downloadedPkg, explicitNames []string, auto bool) error {
 	var installed []string
 	var backups []backup
 
@@ -187,7 +405,7 @@ func (ins *Installer) Install(names []string, auto bool) error {
 
 	for _, d := range downloaded {
 		isExplicit := false
-		for _, n := range names {
+		for _, n := range explicitNames {
 			if n == d.manifest.Name {
 				isExplicit = true
 				break
