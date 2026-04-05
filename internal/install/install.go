@@ -68,6 +68,27 @@ func (ins *Installer) cacheDir() string {
 	return ins.rootPath(state.CacheDir)
 }
 
+// bashInRoot reports whether /bin/bash exists in the target root. In online
+// mode it always returns true (bash is expected to be present on the running
+// system). In offline mode it checks for the file in the sysroot, returning
+// false only when the absence is confirmed (os.IsNotExist); permission errors
+// or other stat failures are treated as "present".
+func (ins *Installer) bashInRoot() bool {
+	_, err := os.Stat(ins.rootPath("/bin/bash"))
+	if os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
+
+// shouldSkipScriptStaging reports whether lifecycle script staging should be
+// skipped for the given manifest during an offline install. Core packages skip
+// staging when /bin/bash is not yet present in the sysroot, allowing
+// foundational packages to be installed before bash is available.
+func (ins *Installer) shouldSkipScriptStaging(m *pkg.Manifest) bool {
+	return m.Core && !ins.bashInRoot()
+}
+
 // Install installs the given packages with full dependency resolution.
 // If auto is true, packages are marked as automatically installed.
 func (ins *Installer) Install(names []string, auto bool) error {
@@ -119,6 +140,29 @@ func (ins *Installer) Install(names []string, auto bool) error {
 		downloaded = append(downloaded, downloadedPkg{item, dpkPath, manifest})
 	}
 
+	// Validate the target root now that package manifests are known.
+	// Core packages (e.g. bash itself) bypass the /bin/bash presence check so
+	// they can be installed into a fresh sysroot. If any package in the set is
+	// not core, the full check (including /bin/bash) is enforced.
+	if ins.isOffline() {
+		allCore := true
+		for _, d := range downloaded {
+			if !d.manifest.Core {
+				allCore = false
+				break
+			}
+		}
+		if allCore {
+			if err := validateBlueyOSRootNoBash(ins.RootDir); err != nil {
+				return err
+			}
+		} else {
+			if err := ValidateBlueyOSRoot(ins.RootDir); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Transactional install
 	var installed []string
 	var backups []backup
@@ -165,17 +209,23 @@ func (ins *Installer) Install(names []string, auto bool) error {
 		if ins.isOffline() {
 			// Offline: stage preinst as a claw firstboot service (runs before
 			// postinst on first boot, after claw-rootfs.target).
+			// Core packages skip staging when /bin/bash is not yet present in
+			// the sysroot (they are being installed to provide bash itself).
 			if d.manifest.Scripts.PreInst != "" {
-				if err := ins.stageFirstBootScript(
-					d.manifest.Name, "preinst",
-					d.manifest.Scripts.PreInst,
-					nil,
-				); err != nil {
-					os.RemoveAll(pkgStagingDir)
-					rollback()
-					return fmt.Errorf("stage preinst for %s: %w", d.manifest.Name, err)
+				if ins.shouldSkipScriptStaging(d.manifest) {
+					fmt.Printf("  Skipping preinst for %s (core package, /bin/bash not yet in sysroot)\n", d.manifest.Name)
+				} else {
+					if err := ins.stageFirstBootScript(
+						d.manifest.Name, "preinst",
+						d.manifest.Scripts.PreInst,
+						nil,
+					); err != nil {
+						os.RemoveAll(pkgStagingDir)
+						rollback()
+						return fmt.Errorf("stage preinst for %s: %w", d.manifest.Name, err)
+					}
+					fmt.Printf("  Staged preinst for %s as claw firstboot service\n", d.manifest.Name)
 				}
-				fmt.Printf("  Staged preinst for %s as claw firstboot service\n", d.manifest.Name)
 			}
 		} else {
 			// Online: run preinst immediately
@@ -237,27 +287,33 @@ func (ins *Installer) Install(names []string, auto bool) error {
 		if ins.isOffline() {
 			// Offline: stage postinst as a claw firstboot service.
 			// If preinst was also staged, ensure postinst runs after it.
+			// Core packages skip staging when /bin/bash is not yet present in
+			// the sysroot.
 			if d.manifest.Scripts.PostInst != "" {
-				var afterUnits []string
-				if d.manifest.Scripts.PreInst != "" {
-					afterUnits = append(afterUnits,
-						fmt.Sprintf("dimsim-preinst-%s", d.manifest.Name))
-				}
-				if err := ins.stageFirstBootScript(
-					d.manifest.Name, "postinst",
-					d.manifest.Scripts.PostInst,
-					afterUnits,
-				); err != nil {
-					for _, f := range movedFiles {
-						os.Remove(ins.rootPath(f))
+				if ins.shouldSkipScriptStaging(d.manifest) {
+					fmt.Printf("  Skipping postinst for %s (core package, /bin/bash not yet in sysroot)\n", d.manifest.Name)
+				} else {
+					var afterUnits []string
+					if d.manifest.Scripts.PreInst != "" {
+						afterUnits = append(afterUnits,
+							fmt.Sprintf("dimsim-preinst-%s", d.manifest.Name))
 					}
-					for _, b := range pkgBackups {
-						b.restore()
+					if err := ins.stageFirstBootScript(
+						d.manifest.Name, "postinst",
+						d.manifest.Scripts.PostInst,
+						afterUnits,
+					); err != nil {
+						for _, f := range movedFiles {
+							os.Remove(ins.rootPath(f))
+						}
+						for _, b := range pkgBackups {
+							b.restore()
+						}
+						rollback()
+						return fmt.Errorf("stage postinst for %s: %w", d.manifest.Name, err)
 					}
-					rollback()
-					return fmt.Errorf("stage postinst for %s: %w", d.manifest.Name, err)
+					fmt.Printf("  Staged postinst for %s as claw firstboot service\n", d.manifest.Name)
 				}
-				fmt.Printf("  Staged postinst for %s as claw firstboot service\n", d.manifest.Name)
 			}
 		} else {
 			// Online: run postinst immediately

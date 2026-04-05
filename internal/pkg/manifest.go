@@ -37,6 +37,11 @@ type Manifest struct {
 	Homepage    string      `json:"homepage,omitempty"`
 	Files       []FileEntry `json:"files,omitempty"`
 	Scripts     Scripts     `json:"scripts,omitempty"`
+	// Core marks a package as a foundational system package. When true,
+	// offline installs into a sysroot bypass the /bin/bash presence check,
+	// allowing packages like bash itself to be installed into a fresh root.
+	// Lifecycle scripts for core packages are skipped when bash is absent.
+	Core        bool        `json:"core,omitempty"`
 }
 
 // identifierAlwaysAllowed is the set of non-alphanumeric characters that are
