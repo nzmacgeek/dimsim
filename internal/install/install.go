@@ -74,6 +74,9 @@ func (ins *Installer) cacheDir() string {
 // false only when the absence is confirmed (os.IsNotExist); permission errors
 // or other stat failures are treated as "present".
 func (ins *Installer) bashInRoot() bool {
+	if !ins.isOffline() {
+		return true
+	}
 	_, err := os.Stat(ins.rootPath("/bin/bash"))
 	if os.IsNotExist(err) {
 		return false
