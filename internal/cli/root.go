@@ -205,17 +205,14 @@ func buildInstallCmd() *cobra.Command {
 					}
 				}
 
+				// When local files are present, route everything through
+				// InstallFiles so all packages are installed in a single
+				// transaction. If only package names are given, use the
+				// normal repo-backed Install path.
 				if len(filePaths) > 0 {
-					if err := ins.InstallFiles(filePaths, false); err != nil {
-						return err
-					}
+					return ins.InstallFiles(filePaths, pkgNames, false)
 				}
-				if len(pkgNames) > 0 {
-					if err := ins.Install(pkgNames, false); err != nil {
-						return err
-					}
-				}
-				return nil
+				return ins.Install(pkgNames, false)
 			})
 		},
 	}

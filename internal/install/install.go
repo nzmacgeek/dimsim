@@ -3,6 +3,7 @@ package install
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -173,17 +174,21 @@ func (ins *Installer) Install(names []string, auto bool) error {
 
 // InstallFiles installs packages from local .dpk file paths, bypassing TUF
 // repository verification. A warning is always printed because signature
-// verification is skipped.
+// verification is skipped for the local files.
+//
+// pkgNames lists additional package names to install from configured
+// repositories as part of the same transaction. This allows mixing local files
+// and repo packages in a single all-or-nothing install.
 //
 // Dependencies declared in the local packages are satisfied in order of
 // preference:
-//  1. Packages that are already installed on the system.
+//  1. Packages that are already installed on the system (by name or Provides).
 //  2. Other .dpk files provided in paths (they satisfy each other's deps).
 //  3. Packages downloaded from a configured repository.
 //
 // If a required dependency cannot be found through any of these means, an
 // error is returned with a hint on how to supply it.
-func (ins *Installer) InstallFiles(paths []string, auto bool) error {
+func (ins *Installer) InstallFiles(paths []string, pkgNames []string, auto bool) error {
 	// --- 1. Read all manifests --------------------------------------------------
 	type localFile struct {
 		path     string
@@ -205,31 +210,81 @@ func (ins *Installer) InstallFiles(paths []string, auto bool) error {
 		}
 		locals = append(locals, localFile{path: absPath, manifest: m})
 		lf := &locals[len(locals)-1]
+
+		// Error on duplicate package names so the user can resolve the ambiguity.
+		// localByName is keyed by both real names and Provides aliases, so this
+		// check catches both "two files with the same package name" and "new
+		// package's name collides with an existing Provides alias".
+		if existing, exists := localByName[m.Name]; exists {
+			return fmt.Errorf("duplicate local package name %q: provided by %s (package %q) and %s",
+				m.Name, existing.path, existing.manifest.Name, absPath)
+		}
 		localByName[m.Name] = lf
 		for _, prov := range m.Provides {
-			if _, exists := localByName[prov]; !exists {
-				localByName[prov] = lf
+			if existing, exists := localByName[prov]; exists {
+				return fmt.Errorf("local provided name %q from package %q in %s conflicts with package %q in %s",
+					prov, m.Name, absPath, existing.manifest.Name, existing.path)
 			}
+			localByName[prov] = lf
 		}
 	}
 
-	// --- 2. Resolve dependencies (topological order) ----------------------------
+	// --- 2. Build installed-provider map ----------------------------------------
+	// Index installed packages by their real name AND every virtual name they
+	// provide, so that virtual-Provides dependencies are correctly satisfied.
+	allInstalled, err := ins.db.ListPackages()
+	if err != nil {
+		return fmt.Errorf("list installed packages: %w", err)
+	}
+	installedProvides := make(map[string]bool, len(allInstalled)*2)
+	for _, p := range allInstalled {
+		installedProvides[p.Name] = true
+		for _, prov := range p.Provides {
+			installedProvides[prov] = true
+		}
+	}
+
+	// --- 3. Resolve dependencies (topological order) ----------------------------
+	// resolved is keyed by manifest.Name (the real package name) to prevent the
+	// same package from appearing twice in the install plan under different
+	// virtual names.
 	resolved := make(map[string]downloadedPkg)
+	// resolvedNames tracks every name and alias known to be resolved (real names
+	// and virtual provides), so cycle detection and "already done" checks work
+	// for both.
+	resolvedNames := make(map[string]bool)
+	// visiting and stack implement cycle detection: if resolve() is called for a
+	// name that is currently on the stack, a cycle exists.
+	visiting := make(map[string]int)
 	var order []string
+	var stack []string
 
 	var resolve func(name string) error
 	resolve = func(name string) error {
-		if _, ok := resolved[name]; ok {
+		// Already resolved under this name or one of its aliases?
+		if resolvedNames[name] {
 			return nil
 		}
 
-		// Already installed and not being explicitly (re)installed from a file?
-		installed, err := ins.db.GetPackage(name)
-		if err != nil {
-			return err
+		// Cycle detection.
+		if idx, ok := visiting[name]; ok {
+			cycle := make([]string, len(stack)-idx+1)
+			copy(cycle, stack[idx:])
+			cycle[len(cycle)-1] = name
+			return fmt.Errorf("dependency cycle detected: %s", strings.Join(cycle, " -> "))
 		}
-		if installed != nil {
+		visiting[name] = len(stack)
+		stack = append(stack, name)
+		defer func() {
+			delete(visiting, name)
+			stack = stack[:len(stack)-1]
+		}()
+
+		// Already installed (by real name or a virtual Provides) and not being
+		// explicitly (re)installed from a local file?
+		if installedProvides[name] {
 			if _, explicit := localByName[name]; !explicit {
+				resolvedNames[name] = true
 				return nil // dependency satisfied by the installed version
 			}
 		}
@@ -237,6 +292,14 @@ func (ins *Installer) InstallFiles(paths []string, auto bool) error {
 		// Provided by one of the local files passed by the user?
 		if lf, ok := localByName[name]; ok {
 			m := lf.manifest
+
+			// If this package was already queued under its real name (e.g. via
+			// an earlier provides alias), don't add it again.
+			if _, alreadyResolved := resolved[m.Name]; alreadyResolved {
+				resolvedNames[name] = true
+				return nil
+			}
+
 			// Resolve this package's own dependencies first.
 			for _, dep := range m.Depends {
 				d := pkg.ParseDep(dep)
@@ -244,26 +307,49 @@ func (ins *Installer) InstallFiles(paths []string, auto bool) error {
 					return err
 				}
 			}
-			resolved[name] = downloadedPkg{
+			dp := downloadedPkg{
 				planItem: planItem{Name: m.Name, Version: m.Version},
 				dpkPath:  lf.path,
 				manifest: m,
 			}
-			order = append(order, name)
+			resolved[m.Name] = dp
+			resolvedNames[m.Name] = true
+			resolvedNames[name] = true
+			for _, prov := range m.Provides {
+				resolvedNames[prov] = true
+			}
+			order = append(order, m.Name)
 			return nil
 		}
 
 		// Not available locally — try a configured repository.
-		result, err := ins.client.FindPackage(name)
-		if err != nil {
-			return fmt.Errorf(
-				"package %q is required but not installed and not available in any configured repository (hint: install it first or provide the .dpk file directly)",
-				name,
-			)
+		result, findErr := ins.client.FindPackage(name)
+		if findErr != nil {
+			// Distinguish a genuine "not found" from an operational failure
+			// (e.g. database error, network error) so the latter isn't hidden.
+			if errors.Is(findErr, repo.ErrPackageNotFound) {
+				return fmt.Errorf(
+					"package %q is required but not installed and not available in any configured repository (hint: install it first or provide the .dpk file directly)",
+					name,
+				)
+			}
+			return fmt.Errorf("find package %q: %w", name, findErr)
 		}
 		if result.Meta.Custom == nil {
 			return fmt.Errorf("package %q has no metadata in repository", name)
 		}
+
+		// If this repo package was already queued under its real name via a
+		// different alias, don't download or record it again.
+		realName := result.Meta.Custom.Name
+		if realName == "" {
+			realName = name
+		}
+		if _, alreadyResolved := resolved[realName]; alreadyResolved {
+			resolvedNames[name] = true
+			return nil
+		}
+
 		// Resolve repo package's deps before downloading it.
 		for _, dep := range result.Meta.Custom.Depends {
 			d := pkg.ParseDep(dep)
@@ -280,9 +366,9 @@ func (ins *Installer) InstallFiles(paths []string, auto bool) error {
 		if err != nil {
 			return fmt.Errorf("read manifest %s: %w", name, err)
 		}
-		resolved[name] = downloadedPkg{
+		dp := downloadedPkg{
 			planItem: planItem{
-				Name:     name,
+				Name:     realName,
 				Version:  result.Meta.Custom.Version,
 				Repo:     result.Repo,
 				Filename: result.Filename,
@@ -291,17 +377,31 @@ func (ins *Installer) InstallFiles(paths []string, auto bool) error {
 			dpkPath:  dpkPath,
 			manifest: manifest,
 		}
-		order = append(order, name)
+		resolved[realName] = dp
+		resolvedNames[realName] = true
+		resolvedNames[name] = true
+		for _, prov := range manifest.Provides {
+			resolvedNames[prov] = true
+		}
+		order = append(order, realName)
 		return nil
 	}
 
+	// Resolve local files first, then any additional repo package names.
+	// Both sets go through the same resolver so the result is a single
+	// deduplicated, topologically ordered install plan.
 	for _, l := range locals {
 		if err := resolve(l.manifest.Name); err != nil {
 			return err
 		}
 	}
+	for _, name := range pkgNames {
+		if err := resolve(name); err != nil {
+			return err
+		}
+	}
 
-	// --- 3. Build install list --------------------------------------------------
+	// --- 4. Build install list (order deduplicated by manifest.Name) ------------
 	var downloaded []downloadedPkg
 	for _, name := range order {
 		downloaded = append(downloaded, resolved[name])
@@ -312,22 +412,28 @@ func (ins *Installer) InstallFiles(paths []string, auto bool) error {
 		return nil
 	}
 
-	// --- 4. Print plan ----------------------------------------------------------
-	fmt.Println("Warning: packages installed from local files bypass TUF signature verification.")
+	// --- 5. Print plan ----------------------------------------------------------
+	fmt.Println("Warning: local .dpk files are installed without TUF signature verification.")
 	fmt.Println("The following packages will be installed:")
 
-	explicitNames := make([]string, 0, len(locals))
+	explicitLocalNames := make(map[string]bool, len(locals))
 	for _, l := range locals {
-		explicitNames = append(explicitNames, l.manifest.Name)
+		explicitLocalNames[l.manifest.Name] = true
+	}
+	explicitRepoNames := make(map[string]bool, len(pkgNames))
+	for _, n := range pkgNames {
+		explicitRepoNames[n] = true
 	}
 
 	for _, d := range downloaded {
-		marker := " [dependency]"
-		for _, n := range explicitNames {
-			if n == d.manifest.Name {
-				marker = " [local file]"
-				break
-			}
+		var marker string
+		switch {
+		case explicitLocalNames[d.manifest.Name]:
+			marker = " [local file]"
+		case explicitRepoNames[d.manifest.Name]:
+			marker = " [explicit]"
+		default:
+			marker = " [dependency]"
 		}
 		fmt.Printf("  %s %s%s\n", d.manifest.Name, d.manifest.Version, marker)
 	}
@@ -335,7 +441,7 @@ func (ins *Installer) InstallFiles(paths []string, auto bool) error {
 		fmt.Printf("  (offline mode — scripts will be staged for first boot via claw)\n")
 	}
 
-	// --- 5. Validate root -------------------------------------------------------
+	// --- 6. Validate root -------------------------------------------------------
 	if ins.isOffline() {
 		allCore := true
 		for _, d := range downloaded {
@@ -355,28 +461,33 @@ func (ins *Installer) InstallFiles(paths []string, auto bool) error {
 		}
 	}
 
-	// --- 6. Copy local files into the cache ------------------------------------
-	// This mirrors what DownloadPackageTo does for repo packages, and lets
-	// removeOne find the .dpk later for lifecycle script execution.
+	// --- 7. Copy local files into the cache ------------------------------------
+	// removeOne relies on finding the .dpk in the cache to run lifecycle scripts
+	// (prerm/postrm) during removal. Failing to cache prevents clean removal, so
+	// this is treated as a fatal error.
 	if err := os.MkdirAll(ins.cacheDir(), 0755); err != nil {
 		return fmt.Errorf("create cache dir: %w", err)
 	}
 	for i := range downloaded {
 		d := &downloaded[i]
 		if d.planItem.Repo != "" {
-			continue // already in cache from the download step above
+			continue // repo packages are already written to the cache by DownloadPackageTo
 		}
 		dest := filepath.Join(ins.cacheDir(), d.manifest.Filename())
 		if err := copyFile(d.dpkPath, dest); err != nil {
-			// Non-fatal: the package is already installed; the cache is only
-			// needed by removeOne to run lifecycle scripts during removal.
-			fmt.Printf("  Warning: could not cache %s: %v\n", d.manifest.Name, err)
-		} else {
-			d.dpkPath = dest
+			return fmt.Errorf("cache %s for later removal lifecycle handling: %w", d.manifest.Name, err)
 		}
+		d.dpkPath = dest
 	}
 
-	// --- 7. Transactional install -----------------------------------------------
+	// --- 8. Transactional install -----------------------------------------------
+	explicitNames := make([]string, 0, len(explicitLocalNames)+len(explicitRepoNames))
+	for n := range explicitLocalNames {
+		explicitNames = append(explicitNames, n)
+	}
+	for n := range explicitRepoNames {
+		explicitNames = append(explicitNames, n)
+	}
 	return ins.installPackages(downloaded, explicitNames, auto)
 }
 
