@@ -3,6 +3,7 @@ package install
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -92,6 +93,13 @@ func (ins *Installer) shouldSkipScriptStaging(m *pkg.Manifest) bool {
 	return m.Core && !ins.bashInRoot()
 }
 
+// downloadedPkg holds a resolved and downloaded package ready for installation.
+type downloadedPkg struct {
+	planItem planItem
+	dpkPath  string
+	manifest *pkg.Manifest
+}
+
 // Install installs the given packages with full dependency resolution.
 // If auto is true, packages are marked as automatically installed.
 func (ins *Installer) Install(names []string, auto bool) error {
@@ -123,11 +131,6 @@ func (ins *Installer) Install(names []string, auto bool) error {
 	}
 
 	// Download all packages first
-	type downloadedPkg struct {
-		planItem planItem
-		dpkPath  string
-		manifest *pkg.Manifest
-	}
 	var downloaded []downloadedPkg
 
 	for _, item := range plan {
@@ -166,7 +169,333 @@ func (ins *Installer) Install(names []string, auto bool) error {
 		}
 	}
 
-	// Transactional install
+	return ins.installPackages(downloaded, names, auto)
+}
+
+// InstallFiles installs packages from local .dpk file paths, bypassing TUF
+// repository verification. A warning is always printed because signature
+// verification is skipped for the local files.
+//
+// pkgNames lists additional package names to install from configured
+// repositories as part of the same transaction. This allows mixing local files
+// and repo packages in a single all-or-nothing install.
+//
+// Dependencies declared in the local packages are satisfied in order of
+// preference:
+//  1. Packages that are already installed on the system (by name or Provides).
+//  2. Other .dpk files provided in paths (they satisfy each other's deps).
+//  3. Packages downloaded from a configured repository.
+//
+// If a required dependency cannot be found through any of these means, an
+// error is returned with a hint on how to supply it.
+func (ins *Installer) InstallFiles(paths []string, pkgNames []string, auto bool) error {
+	// --- 1. Read all manifests --------------------------------------------------
+	type localFile struct {
+		path     string
+		manifest *pkg.Manifest
+	}
+	var locals []localFile
+	// localByName maps a package name (or virtual "provides" name) to the
+	// local file that provides it.
+	localByName := make(map[string]*localFile)
+
+	for _, p := range paths {
+		absPath, err := filepath.Abs(p)
+		if err != nil {
+			return fmt.Errorf("resolve path %s: %w", p, err)
+		}
+		m, err := pkg.ReadDpkManifest(absPath)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", p, err)
+		}
+		locals = append(locals, localFile{path: absPath, manifest: m})
+		lf := &locals[len(locals)-1]
+
+		// Error on duplicate package names so the user can resolve the ambiguity.
+		// localByName is keyed by both real names and Provides aliases, so this
+		// check catches both "two files with the same package name" and "new
+		// package's name collides with an existing Provides alias".
+		if existing, exists := localByName[m.Name]; exists {
+			return fmt.Errorf("duplicate local package name %q: provided by %s (package %q) and %s",
+				m.Name, existing.path, existing.manifest.Name, absPath)
+		}
+		localByName[m.Name] = lf
+		for _, prov := range m.Provides {
+			if existing, exists := localByName[prov]; exists {
+				return fmt.Errorf("local provided name %q from package %q in %s conflicts with package %q in %s",
+					prov, m.Name, absPath, existing.manifest.Name, existing.path)
+			}
+			localByName[prov] = lf
+		}
+	}
+
+	// --- 2. Build installed-provider map ----------------------------------------
+	// Index installed packages by their real name AND every virtual name they
+	// provide, so that virtual-Provides dependencies are correctly satisfied.
+	allInstalled, err := ins.db.ListPackages()
+	if err != nil {
+		return fmt.Errorf("list installed packages: %w", err)
+	}
+	installedProvides := make(map[string]bool, len(allInstalled)*2)
+	for _, p := range allInstalled {
+		installedProvides[p.Name] = true
+		for _, prov := range p.Provides {
+			installedProvides[prov] = true
+		}
+	}
+
+	// --- 3. Resolve dependencies (topological order) ----------------------------
+	// resolved is keyed by manifest.Name (the real package name) to prevent the
+	// same package from appearing twice in the install plan under different
+	// virtual names.
+	resolved := make(map[string]downloadedPkg)
+	// resolvedNames tracks every name and alias known to be resolved (real names
+	// and virtual provides), so cycle detection and "already done" checks work
+	// for both.
+	resolvedNames := make(map[string]bool)
+	// visiting and stack implement cycle detection: if resolve() is called for a
+	// name that is currently on the stack, a cycle exists.
+	visiting := make(map[string]int)
+	var order []string
+	var stack []string
+
+	var resolve func(name string) error
+	resolve = func(name string) error {
+		// Already resolved under this name or one of its aliases?
+		if resolvedNames[name] {
+			return nil
+		}
+
+		// Cycle detection.
+		if idx, ok := visiting[name]; ok {
+			cycle := make([]string, len(stack)-idx+1)
+			copy(cycle, stack[idx:])
+			cycle[len(cycle)-1] = name
+			return fmt.Errorf("dependency cycle detected: %s", strings.Join(cycle, " -> "))
+		}
+		visiting[name] = len(stack)
+		stack = append(stack, name)
+		defer func() {
+			delete(visiting, name)
+			stack = stack[:len(stack)-1]
+		}()
+
+		// Already installed (by real name or a virtual Provides) and not being
+		// explicitly (re)installed from a local file?
+		if installedProvides[name] {
+			if _, explicit := localByName[name]; !explicit {
+				resolvedNames[name] = true
+				return nil // dependency satisfied by the installed version
+			}
+		}
+
+		// Provided by one of the local files passed by the user?
+		if lf, ok := localByName[name]; ok {
+			m := lf.manifest
+
+			// If this package was already queued under its real name (e.g. via
+			// an earlier provides alias), don't add it again.
+			if _, alreadyResolved := resolved[m.Name]; alreadyResolved {
+				resolvedNames[name] = true
+				return nil
+			}
+
+			// Resolve this package's own dependencies first.
+			for _, dep := range m.Depends {
+				d := pkg.ParseDep(dep)
+				if err := resolve(d.Name); err != nil {
+					return err
+				}
+			}
+			dp := downloadedPkg{
+				planItem: planItem{Name: m.Name, Version: m.Version},
+				dpkPath:  lf.path,
+				manifest: m,
+			}
+			resolved[m.Name] = dp
+			resolvedNames[m.Name] = true
+			resolvedNames[name] = true
+			for _, prov := range m.Provides {
+				resolvedNames[prov] = true
+			}
+			order = append(order, m.Name)
+			return nil
+		}
+
+		// Not available locally — try a configured repository.
+		result, findErr := ins.client.FindPackage(name)
+		if findErr != nil {
+			// Distinguish a genuine "not found" from an operational failure
+			// (e.g. database error, network error) so the latter isn't hidden.
+			if errors.Is(findErr, repo.ErrPackageNotFound) {
+				return fmt.Errorf(
+					"package %q is required but not installed and not available in any configured repository (hint: install it first or provide the .dpk file directly)",
+					name,
+				)
+			}
+			return fmt.Errorf("find package %q: %w", name, findErr)
+		}
+		if result.Meta.Custom == nil {
+			return fmt.Errorf("package %q has no metadata in repository", name)
+		}
+
+		// If this repo package was already queued under its real name via a
+		// different alias, don't download or record it again.
+		realName := result.Meta.Custom.Name
+		if realName == "" {
+			realName = name
+		}
+		if _, alreadyResolved := resolved[realName]; alreadyResolved {
+			resolvedNames[name] = true
+			return nil
+		}
+
+		// Resolve repo package's deps before downloading it.
+		for _, dep := range result.Meta.Custom.Depends {
+			d := pkg.ParseDep(dep)
+			if err := resolve(d.Name); err != nil {
+				return err
+			}
+		}
+		fmt.Printf("  Downloading dependency %s-%s from %s...\n", name, result.Meta.Custom.Version, result.Repo)
+		dpkPath, err := ins.client.DownloadPackageTo(result.Repo, result.Filename, result.Meta, ins.cacheDir())
+		if err != nil {
+			return fmt.Errorf("download %s: %w", name, err)
+		}
+		manifest, err := pkg.ReadDpkManifest(dpkPath)
+		if err != nil {
+			return fmt.Errorf("read manifest %s: %w", name, err)
+		}
+		dp := downloadedPkg{
+			planItem: planItem{
+				Name:     realName,
+				Version:  result.Meta.Custom.Version,
+				Repo:     result.Repo,
+				Filename: result.Filename,
+				Meta:     result.Meta,
+			},
+			dpkPath:  dpkPath,
+			manifest: manifest,
+		}
+		resolved[realName] = dp
+		resolvedNames[realName] = true
+		resolvedNames[name] = true
+		for _, prov := range manifest.Provides {
+			resolvedNames[prov] = true
+		}
+		order = append(order, realName)
+		return nil
+	}
+
+	// Resolve local files first, then any additional repo package names.
+	// Both sets go through the same resolver so the result is a single
+	// deduplicated, topologically ordered install plan.
+	for _, l := range locals {
+		if err := resolve(l.manifest.Name); err != nil {
+			return err
+		}
+	}
+	for _, name := range pkgNames {
+		if err := resolve(name); err != nil {
+			return err
+		}
+	}
+
+	// --- 4. Build install list (order deduplicated by manifest.Name) ------------
+	var downloaded []downloadedPkg
+	for _, name := range order {
+		downloaded = append(downloaded, resolved[name])
+	}
+
+	if len(downloaded) == 0 {
+		fmt.Println("Nothing to install.")
+		return nil
+	}
+
+	// --- 5. Print plan ----------------------------------------------------------
+	fmt.Println("Warning: local .dpk files are installed without TUF signature verification.")
+	fmt.Println("The following packages will be installed:")
+
+	explicitLocalNames := make(map[string]bool, len(locals))
+	for _, l := range locals {
+		explicitLocalNames[l.manifest.Name] = true
+	}
+	explicitRepoNames := make(map[string]bool, len(pkgNames))
+	for _, n := range pkgNames {
+		explicitRepoNames[n] = true
+	}
+
+	for _, d := range downloaded {
+		var marker string
+		switch {
+		case explicitLocalNames[d.manifest.Name]:
+			marker = " [local file]"
+		case explicitRepoNames[d.manifest.Name]:
+			marker = " [explicit]"
+		default:
+			marker = " [dependency]"
+		}
+		fmt.Printf("  %s %s%s\n", d.manifest.Name, d.manifest.Version, marker)
+	}
+	if ins.isOffline() {
+		fmt.Printf("  (offline mode — scripts will be staged for first boot via claw)\n")
+	}
+
+	// --- 6. Validate root -------------------------------------------------------
+	if ins.isOffline() {
+		allCore := true
+		for _, d := range downloaded {
+			if !d.manifest.Core {
+				allCore = false
+				break
+			}
+		}
+		if allCore {
+			if err := validateBlueyOSRootNoBash(ins.RootDir); err != nil {
+				return err
+			}
+		} else {
+			if err := ValidateBlueyOSRoot(ins.RootDir); err != nil {
+				return err
+			}
+		}
+	}
+
+	// --- 7. Copy local files into the cache ------------------------------------
+	// removeOne relies on finding the .dpk in the cache to run lifecycle scripts
+	// (prerm/postrm) during removal. Failing to cache prevents clean removal, so
+	// this is treated as a fatal error.
+	if err := os.MkdirAll(ins.cacheDir(), 0755); err != nil {
+		return fmt.Errorf("create cache dir: %w", err)
+	}
+	for i := range downloaded {
+		d := &downloaded[i]
+		if d.planItem.Repo != "" {
+			continue // repo packages are already written to the cache by DownloadPackageTo
+		}
+		dest := filepath.Join(ins.cacheDir(), d.manifest.Filename())
+		if err := copyFile(d.dpkPath, dest); err != nil {
+			return fmt.Errorf("cache %s for later removal lifecycle handling: %w", d.manifest.Name, err)
+		}
+		d.dpkPath = dest
+	}
+
+	// --- 8. Transactional install -----------------------------------------------
+	explicitNames := make([]string, 0, len(explicitLocalNames)+len(explicitRepoNames))
+	for n := range explicitLocalNames {
+		explicitNames = append(explicitNames, n)
+	}
+	for n := range explicitRepoNames {
+		explicitNames = append(explicitNames, n)
+	}
+	return ins.installPackages(downloaded, explicitNames, auto)
+}
+
+// installPackages performs the transactional installation of a set of already-
+// downloaded packages. explicitNames is the set of package names that the user
+// directly requested (as opposed to those pulled in automatically as
+// dependencies).
+func (ins *Installer) installPackages(downloaded []downloadedPkg, explicitNames []string, auto bool) error {
 	var installed []string
 	var backups []backup
 
@@ -187,7 +516,7 @@ func (ins *Installer) Install(names []string, auto bool) error {
 
 	for _, d := range downloaded {
 		isExplicit := false
-		for _, n := range names {
+		for _, n := range explicitNames {
 			if n == d.manifest.Name {
 				isExplicit = true
 				break

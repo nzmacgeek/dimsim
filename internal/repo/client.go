@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,11 @@ import (
 
 	"github.com/nzmacgeek/dimsim/internal/state"
 )
+
+// ErrPackageNotFound is returned by FindPackage when no configured repository
+// contains the requested package. Callers can use errors.Is to distinguish
+// this from operational failures (e.g. database or network errors).
+var ErrPackageNotFound = errors.New("package not found")
 
 // Client handles TUF-secured repository interactions.
 type Client struct {
@@ -285,7 +291,7 @@ func (c *Client) FindPackage(name string) (*SearchResult, error) {
 			}
 		}
 	}
-	return nil, fmt.Errorf("package not found: %s", name)
+	return nil, fmt.Errorf("%w: %s", ErrPackageNotFound, name)
 }
 
 // DownloadPackage downloads a package file to the default cache directory and verifies its hash.

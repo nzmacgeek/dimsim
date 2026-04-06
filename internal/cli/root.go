@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -173,6 +174,16 @@ func buildInfoCmd() *cobra.Command {
 	}
 }
 
+// isLocalFilePath reports whether s looks like a local .dpk file path rather
+// than a package name. An argument is treated as a local file if it ends with
+// ".dpk" or begins with a path separator prefix ("/", "./", "../").
+func isLocalFilePath(s string) bool {
+	return strings.HasSuffix(s, ".dpk") ||
+		strings.HasPrefix(s, "/") ||
+		strings.HasPrefix(s, "./") ||
+		strings.HasPrefix(s, "../")
+}
+
 func buildInstallCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:          "install <package...>",
@@ -184,7 +195,24 @@ func buildInstallCmd() *cobra.Command {
 			return withDBAt(rootDir, func(db *state.DB) error {
 				client := repo.NewClient(db)
 				ins := install.NewOffline(rootDir, db, client)
-				return ins.Install(args, false)
+
+				var filePaths, pkgNames []string
+				for _, arg := range args {
+					if isLocalFilePath(arg) {
+						filePaths = append(filePaths, arg)
+					} else {
+						pkgNames = append(pkgNames, arg)
+					}
+				}
+
+				// When local files are present, route everything through
+				// InstallFiles so all packages are installed in a single
+				// transaction. If only package names are given, use the
+				// normal repo-backed Install path.
+				if len(filePaths) > 0 {
+					return ins.InstallFiles(filePaths, pkgNames, false)
+				}
+				return ins.Install(pkgNames, false)
 			})
 		},
 	}
