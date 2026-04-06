@@ -1095,7 +1095,9 @@ type backup struct {
 
 func backupFile(path string) (backup, error) {
 	backupPath := path + ".dimsim-backup"
-	os.RemoveAll(backupPath)
+	if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
+		return backup{}, fmt.Errorf("remove existing backup %s: %w", backupPath, err)
+	}
 	if err := copyFile(path, backupPath); err != nil {
 		return backup{}, err
 	}

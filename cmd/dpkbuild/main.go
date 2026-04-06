@@ -435,7 +435,7 @@ func loadTargets(dir string, rk repo.RepoKey) (map[string]repo.TUFTargetMeta, in
 	// (we own this repo, so we just parse it directly).
 	var envelope struct {
 		Signed struct {
-			Version int                           `json:"version"`
+			Version int `json:"version"`
 			Targets map[string]repo.TUFTargetMeta `json:"targets"`
 		} `json:"signed"`
 	}
