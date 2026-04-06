@@ -109,7 +109,8 @@ payload/               Files installed to / on the target system
   "maintainer": "Your Name <you@example.com>",
   "homepage":   "https://example.com",
   "files": [
-    {"path": "/usr/bin/example", "hash": "<sha256>", "size": 12345, "mode": "0755"}
+    {"path": "/usr/bin/example", "hash": "<sha256>", "size": 12345, "mode": "0755"},
+    {"path": "/usr/bin/example-link", "hash": "<sha256(link target)>", "size": 7, "mode": "0777", "type": "symlink", "target": "example"}
   ],
   "scripts": {
     "preinst":  "#!/bin/bash\nset -e\nexit 0\n",
@@ -119,6 +120,10 @@ payload/               Files installed to / on the target system
   }
 }
 ```
+
+Symlink payloads are supported natively. Symlink manifest entries record the
+link target, and the recorded hash is computed from that link target rather
+than the contents of the referenced file.
 
 ## dpkbuild
 

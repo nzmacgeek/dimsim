@@ -1,8 +1,6 @@
 package install
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -20,8 +18,8 @@ import (
 
 // Installer handles package installation, removal, and upgrade.
 type Installer struct {
-	db      *state.DB
-	client  *repo.Client
+	db     *state.DB
+	client *repo.Client
 	// RootDir, when non-empty, makes all file operations relative to this
 	// directory. Used for offline installs into a non-booted target system.
 	RootDir string
@@ -684,7 +682,7 @@ func (ins *Installer) installPackages(downloaded []downloadedPkg, explicitNames 
 
 		// Record files (using TARGET paths, no rootDir prefix)
 		for _, targetPath := range movedFiles {
-			h, err := fileHash(ins.rootPath(targetPath))
+			h, err := pkg.HashPath(ins.rootPath(targetPath))
 			if err != nil {
 				rollback()
 				return fmt.Errorf("hash installed file %s for package %s: %w", targetPath, d.manifest.Name, err)
@@ -894,7 +892,7 @@ func (ins *Installer) Verify() error {
 		}
 		for _, f := range files {
 			actualPath := ins.rootPath(f.Path)
-			h, err := fileHash(actualPath)
+			h, err := pkg.HashPath(actualPath)
 			if os.IsNotExist(err) {
 				fmt.Printf("  MISSING  %s (from %s)\n", f.Path, p.Name)
 				ok = false
@@ -1097,6 +1095,9 @@ type backup struct {
 
 func backupFile(path string) (backup, error) {
 	backupPath := path + ".dimsim-backup"
+	if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
+		return backup{}, fmt.Errorf("remove existing backup %s: %w", backupPath, err)
+	}
 	if err := copyFile(path, backupPath); err != nil {
 		return backup{}, err
 	}
@@ -1111,16 +1112,27 @@ func (b backup) restore() {
 }
 
 func copyFile(src, dst string) error {
+	stat, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+
+	if stat.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(src)
+		if err != nil {
+			return err
+		}
+		if err := os.RemoveAll(dst); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return os.Symlink(target, dst)
+	}
+
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-
-	stat, err := in.Stat()
-	if err != nil {
-		return err
-	}
 
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, stat.Mode())
 	if err != nil {
@@ -1137,24 +1149,13 @@ func moveFile(src, dst string) error {
 		return nil
 	}
 	// Cross-device move
+	if err := os.RemoveAll(dst); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	if err := copyFile(src, dst); err != nil {
 		return err
 	}
 	return os.Remove(src)
-}
-
-func fileHash(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func runScript(script, name, pkgName string) error {
