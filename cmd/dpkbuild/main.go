@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -70,37 +69,7 @@ func newBuildCmd() *cobra.Command {
 				return fmt.Errorf("payload directory not found at %s", payloadDir)
 			}
 
-			// Build file list with hashes
-			var files []pkg.FileEntry
-			err = filepath.Walk(payloadDir, func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					return err
-				}
-				if info.IsDir() {
-					return nil
-				}
-
-				rel, err := filepath.Rel(payloadDir, path)
-				if err != nil {
-					return err
-				}
-				installPath := "/" + filepath.ToSlash(rel)
-
-				hash, err := fileHash(path)
-				if err != nil {
-					return fmt.Errorf("hash %s: %w", path, err)
-				}
-
-				mode := fmt.Sprintf("%04o", info.Mode()&0777)
-
-				files = append(files, pkg.FileEntry{
-					Path: installPath,
-					Hash: hash,
-					Size: info.Size(),
-					Mode: mode,
-				})
-				return nil
-			})
+			files, err := pkg.BuildManifestFileEntries(payloadDir)
 			if err != nil {
 				return fmt.Errorf("walk payload: %w", err)
 			}
@@ -218,20 +187,6 @@ func newInitCmd() *cobra.Command {
 			return nil
 		},
 	}
-}
-
-func fileHash(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // --- repo subcommand ---
@@ -480,7 +435,7 @@ func loadTargets(dir string, rk repo.RepoKey) (map[string]repo.TUFTargetMeta, in
 	// (we own this repo, so we just parse it directly).
 	var envelope struct {
 		Signed struct {
-			Version int                        `json:"version"`
+			Version int                           `json:"version"`
 			Targets map[string]repo.TUFTargetMeta `json:"targets"`
 		} `json:"signed"`
 	}
@@ -508,7 +463,9 @@ func rewriteMetadata(dir string, targets map[string]repo.TUFTargetMeta, targetsV
 	snapVer := 1
 	if raw, err := os.ReadFile(filepath.Join(dir, "snapshot.json")); err == nil {
 		var s struct {
-			Signed struct{ Version int `json:"version"` } `json:"signed"`
+			Signed struct {
+				Version int `json:"version"`
+			} `json:"signed"`
 		}
 		if json.Unmarshal(raw, &s) == nil {
 			snapVer = s.Signed.Version + 1
@@ -527,7 +484,9 @@ func rewriteMetadata(dir string, targets map[string]repo.TUFTargetMeta, targetsV
 	tsVer := 1
 	if raw, err := os.ReadFile(filepath.Join(dir, "timestamp.json")); err == nil {
 		var t struct {
-			Signed struct{ Version int `json:"version"` } `json:"signed"`
+			Signed struct {
+				Version int `json:"version"`
+			} `json:"signed"`
 		}
 		if json.Unmarshal(raw, &t) == nil {
 			tsVer = t.Signed.Version + 1

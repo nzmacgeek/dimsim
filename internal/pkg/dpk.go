@@ -12,9 +12,17 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+// PayloadEntry represents one payload item inside a .dpk archive.
+type PayloadEntry struct {
+	Data   []byte
+	Type   string
+	Target string
+}
+
 // ReadDpk opens a .dpk file and returns the manifest and a map of payload paths to their
-// data. The payload map keys are paths relative to the root (e.g. "usr/bin/foo").
-func ReadDpk(dpkPath string) (*Manifest, map[string][]byte, error) {
+// payload entries. The payload map keys are paths relative to the root
+// (e.g. "usr/bin/foo").
+func ReadDpk(dpkPath string) (*Manifest, map[string]PayloadEntry, error) {
 	f, err := os.Open(dpkPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open dpk: %w", err)
@@ -30,7 +38,7 @@ func ReadDpk(dpkPath string) (*Manifest, map[string][]byte, error) {
 	tr := tar.NewReader(zr)
 
 	var manifest *Manifest
-	payload := make(map[string][]byte)
+	payload := make(map[string]PayloadEntry)
 
 	for {
 		hdr, err := tr.Next()
@@ -57,11 +65,19 @@ func ReadDpk(dpkPath string) (*Manifest, map[string][]byte, error) {
 				continue
 			}
 			rel := strings.TrimPrefix(hdr.Name, "payload/")
+			entry := PayloadEntry{Type: FileTypeRegular}
+			if hdr.Typeflag == tar.TypeSymlink {
+				entry.Type = FileTypeSymlink
+				entry.Target = hdr.Linkname
+				payload[rel] = entry
+				continue
+			}
 			data, err := io.ReadAll(tr)
 			if err != nil {
 				return nil, nil, fmt.Errorf("read payload file %s: %w", rel, err)
 			}
-			payload[rel] = data
+			entry.Data = data
+			payload[rel] = entry
 		}
 	}
 
@@ -167,6 +183,18 @@ func addDirToTar(tw *tar.Writer, srcDir, prefix string) error {
 		tarPath := prefix + "/" + filepath.ToSlash(rel)
 
 		hdr, err := tar.FileInfoHeader(info, "")
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("read symlink %s: %w", path, err)
+			}
+			hdr, err = tar.FileInfoHeader(info, linkTarget)
+			if err != nil {
+				return fmt.Errorf("file info header %s: %w", path, err)
+			}
+			hdr.Name = tarPath
+			return tw.WriteHeader(hdr)
+		}
 		if err != nil {
 			return fmt.Errorf("file info header %s: %w", path, err)
 		}
@@ -258,6 +286,17 @@ func ExtractDpkPayload(dpkPath, destDir string) ([]string, error) {
 			if err := os.MkdirAll(dest, os.FileMode(hdr.Mode)|0755); err != nil {
 				return nil, fmt.Errorf("mkdir %s: %w", dest, err)
 			}
+			continue
+		}
+
+		if hdr.Typeflag == tar.TypeSymlink {
+			if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+				return nil, fmt.Errorf("mkdir parent %s: %w", dest, err)
+			}
+			if err := os.Symlink(hdr.Linkname, dest); err != nil {
+				return nil, fmt.Errorf("create symlink %s -> %s: %w", dest, hdr.Linkname, err)
+			}
+			extracted = append(extracted, dest)
 			continue
 		}
 

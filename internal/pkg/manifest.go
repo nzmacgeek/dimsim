@@ -9,10 +9,12 @@ import (
 
 // FileEntry represents a file entry in the manifest.
 type FileEntry struct {
-	Path string `json:"path"`
-	Hash string `json:"hash"`
-	Size int64  `json:"size"`
-	Mode string `json:"mode"`
+	Path   string `json:"path"`
+	Hash   string `json:"hash"`
+	Size   int64  `json:"size"`
+	Mode   string `json:"mode"`
+	Type   string `json:"type,omitempty"`
+	Target string `json:"target,omitempty"`
 }
 
 // Scripts holds optional install/remove lifecycle scripts.
@@ -41,7 +43,7 @@ type Manifest struct {
 	// offline installs into a sysroot bypass the /bin/bash presence check,
 	// allowing packages like bash itself to be installed into a fresh root.
 	// Lifecycle scripts for core packages are skipped when bash is absent.
-	Core        bool        `json:"core,omitempty"`
+	Core bool `json:"core,omitempty"`
 }
 
 // identifierAlwaysAllowed is the set of non-alphanumeric characters that are
