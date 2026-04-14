@@ -13,6 +13,40 @@ const clawServicesDir = "/etc/claw/services.d"
 // firstbootBaseDir is where staged lifecycle scripts are kept on the target.
 const firstbootBaseDir = "/var/lib/dimsim/firstboot"
 
+// truncateString returns the first n bytes of s, or s if len(s) <= n.
+func truncateString(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// hasValidShebang reports whether s begins with a recognised interpreter
+// declaration (#!/bin/bash or #!/bin/sh) optionally followed by a newline
+// (LF or CRLF) or end of string.
+func hasValidShebang(s string) bool {
+	for _, interp := range []string{"#!/bin/bash", "#!/bin/sh"} {
+		if !strings.HasPrefix(s, interp) {
+			continue
+		}
+		rest := s[len(interp):]
+		if rest == "" || strings.HasPrefix(rest, "\r\n") || strings.HasPrefix(rest, "\n") {
+			return true
+		}
+	}
+	return false
+}
+
+// validateShebang returns an error if s does not start with a valid shebang.
+// label distinguishes the kind of script (e.g. "lifecycle script", "firstboot wrapper").
+func validateShebang(label, pkgName, scriptName, s string) error {
+	if !hasValidShebang(s) {
+		return fmt.Errorf("%s validation failed for %s/%s: script does not start with a valid shebang (got first 32 bytes: %q)",
+			label, pkgName, scriptName, truncateString(s, 32))
+	}
+	return nil
+}
+
 // ValidateBlueyOSRoot checks that rootDir looks like a BlueyOS root filesystem.
 // It requires /etc/claw/ (the claw init system config directory) and /bin/bash.
 func ValidateBlueyOSRoot(rootDir string) error {
@@ -79,6 +113,12 @@ func (ins *Installer) stageFirstBootScript(pkgName, scriptName, script string, a
 	svcName := fmt.Sprintf("dimsim-%s-%s", scriptName, pkgName)
 	svcTargetPath := filepath.Join(clawServicesDir, svcName+".yml")
 
+	// Validate that the raw lifecycle script starts with a valid shebang.
+	// This ensures we don't write corrupted or malformed scripts to the target.
+	if err := validateShebang("lifecycle script", pkgName, scriptName, script); err != nil {
+		return err
+	}
+
 	// Write the raw lifecycle script to the target rootfs
 	if err := os.WriteFile(ins.rootPath(scriptTargetPath), []byte(script), 0755); err != nil {
 		return fmt.Errorf("write firstboot script %s/%s: %w", pkgName, scriptName, err)
@@ -102,6 +142,12 @@ rm -f %s
 
 exit $EXIT_CODE
 `, scriptName, pkgName, scriptTargetPath, svcTargetPath)
+
+	// Validate that the wrapper starts with a valid shebang before writing to disk.
+	// This catches corrupted buffers or template errors early.
+	if err := validateShebang("firstboot wrapper", pkgName, scriptName, wrapper); err != nil {
+		return err
+	}
 
 	if err := os.WriteFile(ins.rootPath(wrapperTargetPath), []byte(wrapper), 0755); err != nil {
 		return fmt.Errorf("write firstboot wrapper %s/%s: %w", pkgName, scriptName, err)

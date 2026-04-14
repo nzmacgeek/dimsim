@@ -6,4 +6,8 @@ set -e
 # Add your pre-installation steps here.
 # Example: create users, stop services, etc.
 
+# IMPORTANT: BlueyOS does not have getent. Use grep against /etc/passwd and /etc/group:
+# Check if user exists: grep -q '^username:' /etc/passwd
+# Check if group exists: grep -q '^groupname:' /etc/group
+
 exit 0

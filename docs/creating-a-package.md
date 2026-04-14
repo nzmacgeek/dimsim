@@ -93,7 +93,15 @@ All scripts use `/bin/bash` (BlueyOS has bash but no `/bin/sh`).
 #!/bin/bash
 set -e
 # Example: create a system user the package needs
-# id -u hellouser &>/dev/null || useradd -r -s /bin/false hellouser
+
+# IMPORTANT: BlueyOS does not have getent. Use grep against /etc/passwd and /etc/group:
+# Check if user exists: grep -q '^username:' /etc/passwd
+# Check if group exists: grep -q '^groupname:' /etc/group
+
+# if ! grep -q '^hellouser:' /etc/passwd; then
+#   useradd -r -s /bin/false hellouser
+# fi
+
 exit 0
 ```
 

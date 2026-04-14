@@ -214,6 +214,41 @@ services. The target picks them up on its next boot.
 
 ---
 
+## Known Issues and External Dependencies
+
+### D-3: `getcwd` failure in bash service scripts (depends on kernel fix)
+
+**Status:** OPEN — depends on kernel K-6 and claw C-1
+
+Every bash process spawned by claw fails with:
+```
+shell-init: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory
+```
+
+This is non-fatal for script execution but causes bash to operate without a known working directory, which breaks any script using relative paths or `pwd`.
+
+**Root cause:** The BlueyOS kernel VFS implementation does not correctly populate `.` and `..` directory entries (K-6), and claw does not `chdir` to a valid directory before spawning service processes (C-1).
+
+**Resolution:** This issue must be fixed in the kernel and claw, not in dimsim.
+
+---
+
+### D-4: Interleaved log output from concurrent services (depends on kernel/claw fix)
+
+**Status:** OPEN — kernel serialization issue
+
+The boot log shows log lines from multiple concurrent bash/claw processes interleaved in a single stream. This makes debugging very difficult.
+
+**Root cause:** The kernel's VGA output (`kprintf`) is not serialized against user-mode writes to `/var/log/kernel.log`.
+
+**Fix options:**
+1. **Short term:** Add a kernel spinlock around the VGA write path
+2. **Long term:** Route all service stdout/stderr through `yap` (the syslog daemon) with a sequence number prefix
+
+**Resolution:** This issue must be fixed in the kernel and/or claw, not in dimsim.
+
+---
+
 ## Relationship to the running-system install flow
 
 When `--root` is **not** provided, `dimsim install` behaves exactly as
