@@ -1,0 +1,26 @@
+%rename cpp_options old_cpp_options
+*cpp_options:
+-nostdinc -isystem /opt/blueyos-sysroot/usr/include -isystem /opt/blueyos-cross/lib/gcc/i386-blueyos-elf/13.2.0/include -isystem include%s %(old_cpp_options)
+
+*cc1:
+%(cc1_cpu) -nostdinc -isystem /opt/blueyos-sysroot/usr/include -isystem /opt/blueyos-cross/lib/gcc/i386-blueyos-elf/13.2.0/include -isystem include%s
+
+*startfile:
+%{!shared: /opt/blueyos-sysroot/usr/lib/crt1.o} /opt/blueyos-sysroot/usr/lib/crti.o crtbegin.o%s
+
+*endfile:
+crtend.o%s /opt/blueyos-sysroot/usr/lib/crtn.o
+
+*link_libgcc:
+-L/opt/blueyos-sysroot/usr/lib -L/opt/blueyos-cross/lib/gcc/i386-blueyos-elf/13.2.0 -L .%s
+
+*libgcc:
+libgcc.a%s
+
+*link:
+--sysroot=/opt/blueyos-sysroot -nostdlib %{shared:-shared} %{static:-static} %{rdynamic:-export-dynamic}
+
+*lib:
+%{!shared:-lc}
+
+*link_ssp:

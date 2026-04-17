@@ -1,6 +1,8 @@
 # dimsim
 
-A package manager for [BlueyOS](https://github.com/nzmacgeek/biscuits) — an imaginary Linux-like operating system whose userland consists of **bash**, **musl-libc**, and **claw** (init).
+A package manager for [BlueyOS](https://github.com/nzmacgeek/biscuits).
+
+`dimsim` has been rebuilt in C for musl-blueyos compatibility and static deployment into BlueyOS images.
 
 ## Documentation
 
@@ -15,30 +17,48 @@ A package manager for [BlueyOS](https://github.com/nzmacgeek/biscuits) — an im
 
 | Binary | Purpose |
 |--------|---------|
-| `dimsim` | Package manager CLI |
+| `dimsim` | Package manager CLI (C rewrite, static musl build) |
 | `dpkbuild` | Build and scaffold `.dpk` packages |
 
-## Building for BlueyOS
+## Building for BlueyOS (C rewrite)
 
-Both binaries are compiled as fully **static** executables (`CGO_ENABLED=0`) so they carry no dependency on glibc or any shared library.
+The `dimsim` binary is built via autoconf/automake and linked fully static by default.
 
 ```bash
-# Build both binaries for linux/amd64 (default)
+# Build C dimsim + Go dpkbuild
 make
 
-# Cross-compile for another architecture
-make GOARCH=arm64
+# Build only dimsim in an out-of-tree build dir
+./autogen.sh
+mkdir -p build && cd build
+../configure-blueyos --prefix= --bindir=/bin --sysconfdir=/etc --localstatedir=/var
+make -j$(nproc)
+
+# Verify static linking
+file src/dimsim
+ldd src/dimsim 2>&1 || true
+
+# Install into a host-side sysroot for image construction
+make install DESTDIR=/tmp/blueyos-root
 
 # Outputs
-bin/dimsim
+_build/src/dimsim
 bin/dpkbuild
 ```
 
-You can also build directly with `go`:
+`make` uses a convenience wrapper that runs `autogen.sh`, configures with static linking, and builds in `_build/`.
+
+Useful variables:
 
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-w -s" -o bin/dimsim ./cmd/dimsim
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-w -s" -o bin/dpkbuild ./cmd/dpkbuild
+# Optional: point to a specific musl toolchain prefix
+make MUSL_PREFIX=/opt/blueyos-cross
+
+# Optional: override sysroot
+make SYSROOT=/opt/blueyos-sysroot
+
+# Optional: set build number embedded into --version output
+make BUILD_NUMBER=42
 ```
 
 ## State files
@@ -53,6 +73,11 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-w -s" -o bin/dpkbuild 
 ## dimsim CLI
 
 ```
+dimsim --version               Show version/build metadata
+dimsim -v/-vv ...              Increase log verbosity
+dimsim --verbose-level 0|1|2   Set verbosity explicitly
+dimsim --root <path> ...       Operate on a target root filesystem
+
 dimsim repo add <name> <url>   Add a repository
 dimsim repo list               List configured repositories
 dimsim update                  Refresh TUF metadata for all repos
@@ -67,6 +92,8 @@ dimsim pin <pkg>               Prevent a package from being upgraded
 dimsim unpin <pkg>             Allow a package to be upgraded again
 dimsim doctor                  Check for broken dependencies and other issues
 ```
+
+The current C rewrite fully implements repository list/add/remove. Additional package operations are being migrated from the historical Go implementation.
 
 ## Repository security (TUF)
 

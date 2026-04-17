@@ -1,0 +1,9 @@
+{
+  "name": "tzinfo",
+  "version": "0.1.0",
+  "arch": "amd64",
+  "description": "Description of tzinfo",
+  "maintainer": "Your Name \u003cyour@email.com\u003e",
+  "homepage": "https://example.com/tzinfo",
+  "scripts": {}
+}

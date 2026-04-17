@@ -1,0 +1,9 @@
+#!/bin/bash
+# Post-installation script
+# Called after files are placed.
+set -e
+
+# Add your post-installation steps here.
+# Example: enable services, update configs, etc.
+
+exit 0

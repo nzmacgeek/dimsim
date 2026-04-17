@@ -1,0 +1,22 @@
+#!/bin/sh
+# configure-blueyos -- convenience wrapper for cross-compiling dimsim against
+# the BlueyOS i386 toolchain at /opt/blueyos-cross + /opt/blueyos-sysroot.
+
+set -e
+
+script_dir=$(cd "$(dirname "$0")" && pwd)
+configure="$script_dir/configure"
+
+if [ ! -x "$configure" ]; then
+    echo "configure-blueyos: cannot find $configure" >&2
+    echo "Run ./autogen.sh in the source directory first." >&2
+    exit 1
+fi
+
+exec "$configure" \
+    --host=i386-blueyos-elf \
+    --enable-static-binary \
+    --with-musl=no \
+    --with-sysroot="${BLUEYOS_SYSROOT:-/opt/blueyos-sysroot}" \
+    CC="$script_dir/blueyos-cc" \
+    "$@"

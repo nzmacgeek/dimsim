@@ -1,0 +1,9 @@
+#!/bin/bash
+# Pre-removal script
+# Called before files are removed.
+set -e
+
+# Add your pre-removal steps here.
+# Example: stop services, backup configs, etc.
+
+exit 0

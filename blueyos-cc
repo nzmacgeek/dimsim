@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+BLUEYOS_CROSS=${BLUEYOS_CROSS:-/opt/blueyos-cross}
+CC="${BLUEYOS_CROSS}/bin/i386-blueyos-elf-gcc"
+
+exec "$CC" -specs="$SCRIPT_DIR/blueyos-cross.specs" "$@"
