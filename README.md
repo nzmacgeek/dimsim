@@ -7,8 +7,7 @@ A package manager for [BlueyOS](https://github.com/nzmacgeek/biscuits) — an im
 | Guide | Description |
 |-------|-------------|
 | [Creating a Package](docs/creating-a-package.md) | Build a `.dpk` from scratch with `dpkbuild` |
-| [Repository Setup](docs/repository-setup.md) | Create and maintain a TUF-signed repository |
-| [Package Management](docs/package-management.md) | Install, remove, upgrade, and maintain packages |
+| [Package Management](docs/package-management.md) | Install, remove, inspect, and verify local packages |
 | [Offline / Target-Root Install](docs/offline-install.md) | Provision packages into a non-booted BlueyOS rootfs |
 
 ## Binaries
@@ -20,25 +19,30 @@ A package manager for [BlueyOS](https://github.com/nzmacgeek/biscuits) — an im
 
 ## Building for BlueyOS
 
-Both binaries are compiled as fully **static** executables (`CGO_ENABLED=0`) so they carry no dependency on glibc or any shared library.
+Both binaries are compiled as fully **static** C executables (`-static`) so they carry no dependency on glibc or any shared library.
 
 ```bash
 # Build both binaries for linux/amd64 (default)
 make
 
-# Cross-compile for another architecture
-make GOARCH=arm64
+# Build with the BlueyOS musl toolchain profile
+make blueyos
 
 # Outputs
 bin/dimsim
 bin/dpkbuild
 ```
 
-You can also build directly with `go`:
+Install to `/usr/bin`:
 
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-w -s" -o bin/dimsim ./cmd/dimsim
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-w -s" -o bin/dpkbuild ./cmd/dpkbuild
+make install
+```
+
+Use a non-default musl compiler path when needed:
+
+```bash
+make blueyos MUSL_CC=/opt/musl/bin/musl-gcc
 ```
 
 ## State files
@@ -50,38 +54,19 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-w -s" -o bin/dpkbuild 
 | `/var/lib/dimsim/cache/` | Downloaded `.dpk` files |
 | `/var/lib/dimsim/staging/` | Transactional install staging area |
 
-## dimsim CLI
+## dimsim CLI (C edition)
 
 ```
-dimsim repo add <name> <url>   Add a repository
-dimsim repo list               List configured repositories
-dimsim update                  Refresh TUF metadata for all repos
-dimsim search <query>          Search available packages
-dimsim info <pkg>              Show package details
-dimsim install <pkg...>        Install packages
-dimsim remove <pkg...>         Remove packages
-dimsim upgrade [pkg...]        Upgrade all or specific packages
-dimsim autoremove              Remove unneeded auto-installed packages
+dimsim install <pkg.dpk...>    Install local package archives
+dimsim remove <pkg...>         Remove installed packages
+dimsim info <pkg>              Show installed package details
 dimsim verify                  Verify installed file integrity
-dimsim pin <pkg>               Prevent a package from being upgraded
-dimsim unpin <pkg>             Allow a package to be upgraded again
-dimsim doctor                  Check for broken dependencies and other issues
+dimsim list                    List installed packages
 ```
-
-## Repository security (TUF)
-
-Repositories use [The Update Framework](https://theupdateframework.io/) with four signed metadata roles:
-
-- **root** — root of trust; contains public keys and role definitions
-- **timestamp** — short-lived; contains the hash of `snapshot.json`
-- **snapshot** — contains hashes of all other metadata files
-- **targets** — contains per-package hash, size, and custom metadata
-
-Signature verification uses **ed25519**. Metadata expiry is enforced before any package is downloaded.
 
 ## Package format (.dpk)
 
-A `.dpk` file is a **tar.zst** archive with two top-level directories:
+A `.dpk` file is a **tar** archive with two top-level directories. The C rewrite intentionally dropped zstd compression to avoid runtime compression-library dependencies in static builds.
 
 ```
 meta/

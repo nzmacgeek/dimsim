@@ -152,7 +152,7 @@ Building hello-1.0.0-amd64.dpk...
   SHA256: a3f8c2...
 ```
 
-The resulting file `hello-1.0.0-amd64.dpk` is a `tar.zst` archive containing:
+The resulting file `hello-1.0.0-amd64.dpk` is a `tar` archive containing:
 
 ```
 meta/manifest.json

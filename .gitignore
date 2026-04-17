@@ -52,7 +52,7 @@ Module.symvers
 Mkfile.old
 dkms.conf
 
-# Go build artifacts
+# Build artifacts
 bin/
 
 # debug information files
