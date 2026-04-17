@@ -1,5 +1,6 @@
 AC_INIT([dimsim],[2.0.0-c],[maintainers@blueyos.example])
 AM_INIT_AUTOMAKE([foreign])
+AC_PREFIX_DEFAULT([/usr])
 AC_PROG_CC
 AC_ARG_WITH([musl-cc],
   AS_HELP_STRING([--with-musl-cc=PATH],[path to musl compiler (default: musl-gcc)]),

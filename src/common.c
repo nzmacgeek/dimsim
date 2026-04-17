@@ -307,3 +307,28 @@ int sha256_hex_file(const char *path, char out_hex[65]) {
     out_hex[64] = '\0';
     return 0;
 }
+
+int is_safe_identifier(const char *s) {
+    if (!s || !*s) return 0;
+    if (*s == '.' || *s == '-') return 0;
+    for (const char *p = s; *p; ++p) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '/' || c == '\\' || c < 32 || c == 127) return 0;
+        if (*p == '.' && (p[1] == '.' || p[1] == '\0' || p[1] == '/')) return 0;
+    }
+    return 1;
+}
+
+int is_safe_install_path(const char *path) {
+    if (!path || !*path) return 0;
+    if (path[0] != '/') return 0;
+    const char *p = path;
+    while (*p) {
+        if (p[0] == '/' && p[1] == '/') return 0;
+        if (p[0] == '.' && p[1] == '.' && (p[2] == '/' || p[2] == '\0')) return 0;
+        if (p == path && p[0] == '.' && p[1] == '.') return 0;
+        if ((unsigned char)*p < 32 || (unsigned char)*p == 127) return 0;
+        p++;
+    }
+    return 1;
+}
