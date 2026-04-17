@@ -1,9 +1,8 @@
-CC ?= cc
-CFLAGS ?= -O2 -Wall -Wextra -std=c11
-LDFLAGS ?=
-STATIC ?= 1
+CC = @CC@
+CFLAGS = @CFLAGS@ -O2 -Wall -Wextra -std=c11
+LDFLAGS = @LDFLAGS@ @EXTRA_LDFLAGS@
 
-PREFIX ?= /usr
+PREFIX ?= @prefix@
 BINDIR ?= $(PREFIX)/bin
 
 OUTDIR := bin
@@ -11,10 +10,6 @@ DIMSIM := $(OUTDIR)/dimsim
 DPKBUILD := $(OUTDIR)/dpkbuild
 
 COMMON_SRCS := src/common.c src/tar.c src/manifest.c
-
-ifeq ($(STATIC),1)
-LDFLAGS += -static
-endif
 
 .PHONY: all clean test install uninstall
 
