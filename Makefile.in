@@ -2,6 +2,7 @@ CC = @CC@
 CFLAGS = @CFLAGS@ -O2 -Wall -Wextra -std=c11
 LDFLAGS = @LDFLAGS@ @EXTRA_LDFLAGS@
 # BlueyOS targets musl. Static linking on glibc hosts may have NSS limitations.
+MUSL_CC = @MUSL_CC@
 
 PREFIX ?= @prefix@
 BINDIR ?= $(PREFIX)/bin
@@ -12,7 +13,7 @@ DPKBUILD := $(OUTDIR)/dpkbuild
 
 COMMON_SRCS := src/common.c src/tar.c src/manifest.c
 
-.PHONY: all clean test install uninstall
+.PHONY: all clean test install uninstall blueyos check-static
 
 all: $(DIMSIM) $(DPKBUILD)
 
@@ -27,6 +28,16 @@ $(DPKBUILD): $(OUTDIR) src/dpkbuild.c $(COMMON_SRCS) src/common.h src/tar.h src/
 
 test: all
 	@echo "No standalone test suite is currently defined."
+
+blueyos:
+	@command -v "$(MUSL_CC)" >/dev/null 2>&1 || { echo "musl toolchain not found: $(MUSL_CC)"; exit 1; }
+	$(MAKE) clean
+	$(MAKE) CC="$(MUSL_CC)" STATIC=1 all
+	$(MAKE) check-static
+
+check-static: all
+	@file "$(DIMSIM)" | grep -q "statically linked"
+	@file "$(DPKBUILD)" | grep -q "statically linked"
 
 install: all
 	install -d "$(DESTDIR)$(BINDIR)"

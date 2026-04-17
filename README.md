@@ -25,6 +25,9 @@ Both binaries are compiled as fully **static** C executables (`-static`) so they
 # Build both binaries for linux/amd64 (default)
 make
 
+# Build with the BlueyOS musl toolchain profile
+make blueyos
+
 # Outputs
 bin/dimsim
 bin/dpkbuild
@@ -34,6 +37,12 @@ Install to `/usr/bin`:
 
 ```bash
 make install
+```
+
+Use a non-default musl compiler path when needed:
+
+```bash
+make blueyos MUSL_CC=/opt/musl/bin/musl-gcc
 ```
 
 ## State files

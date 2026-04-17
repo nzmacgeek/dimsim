@@ -2,6 +2,7 @@ CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -std=c11
 LDFLAGS ?=
 STATIC ?= 1
+MUSL_CC ?= musl-gcc
 
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
@@ -17,7 +18,7 @@ ifeq ($(STATIC),1)
 LDFLAGS += -static
 endif
 
-.PHONY: all clean test install uninstall
+.PHONY: all clean test install uninstall blueyos check-static
 
 all: $(DIMSIM) $(DPKBUILD)
 
@@ -32,6 +33,16 @@ $(DPKBUILD): $(OUTDIR) src/dpkbuild.c $(COMMON_SRCS) src/common.h src/tar.h src/
 
 test: all
 	@echo "No standalone test suite is currently defined."
+
+blueyos:
+	@command -v "$(MUSL_CC)" >/dev/null 2>&1 || { echo "musl toolchain not found: $(MUSL_CC)"; exit 1; }
+	$(MAKE) clean
+	$(MAKE) CC="$(MUSL_CC)" STATIC=1 all
+	$(MAKE) check-static
+
+check-static: all
+	@file "$(DIMSIM)" | grep -q "statically linked"
+	@file "$(DPKBUILD)" | grep -q "statically linked"
 
 install: all
 	install -d "$(DESTDIR)$(BINDIR)"
