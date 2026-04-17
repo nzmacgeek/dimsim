@@ -67,13 +67,20 @@ int read_file(const char *path, unsigned char **out, size_t *out_len) {
 }
 
 int write_file(const char *path, const unsigned char *data, size_t len, mode_t mode) {
-    FILE *f;
+    int fd;
     if (ensure_parent_dir(path, 0755) != 0) return -1;
-    f = fopen(path, "wb");
-    if (!f) return -1;
-    if (len && fwrite(data, 1, len, f) != len) { fclose(f); return -1; }
-    if (fclose(f) != 0) return -1;
-    if (chmod(path, mode) != 0) return -1;
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    if (fd < 0) return -1;
+    if (len) {
+        size_t off = 0;
+        while (off < len) {
+            ssize_t w = write(fd, data + off, len - off);
+            if (w <= 0) { close(fd); return -1; }
+            off += (size_t)w;
+        }
+    }
+    if (fchmod(fd, mode) != 0) { close(fd); return -1; }
+    if (close(fd) != 0) return -1;
     return 0;
 }
 
@@ -129,7 +136,7 @@ struct walk_ctx {
     int (*cb)(const char *, const char *, void *);
     void *user;
 };
-static struct walk_ctx *g_walk_ctx;
+static __thread struct walk_ctx *g_walk_ctx;
 
 static int walk_cb(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) {
     (void)sb;

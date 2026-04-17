@@ -4,11 +4,13 @@
 #include "tar.h"
 
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static const char *default_state_dir = "/var/lib/dimsim";
@@ -53,12 +55,18 @@ static int run_script(const char *content, const char *arg, const Ctx *ctx) {
     snprintf(script, sizeof(script), "%s/run-script-%d.sh", ctx->staging_dir, getpid());
     if (write_file(script, (const unsigned char *)content, strlen(content), 0755) != 0) return -1;
     setenv("DIMSIM_ROOT", ctx->root, 1);
-    char cmd[PATHBUF * 2];
-    if (arg && *arg) snprintf(cmd, sizeof(cmd), "/bin/bash '%s' '%s'", script, arg);
-    else snprintf(cmd, sizeof(cmd), "/bin/bash '%s'", script);
-    int rc = system(cmd);
+    pid_t pid = fork();
+    int rc = -1;
+    if (pid == 0) {
+        if (arg && *arg) execl("/bin/bash", "bash", script, arg, (char *)NULL);
+        else execl("/bin/bash", "bash", script, (char *)NULL);
+        _exit(127);
+    } else if (pid > 0) {
+        int status = 0;
+        if (waitpid(pid, &status, 0) >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) rc = 0;
+    }
     unlink(script);
-    return rc == 0 ? 0 : -1;
+    return rc;
 }
 
 static int save_pkg_state(const Ctx *ctx, const Manifest *m) {
@@ -258,23 +266,21 @@ static int cmd_info(const Ctx *ctx, const char *pkg) {
 }
 
 static int cmd_verify(const Ctx *ctx) {
-    char cmd[PATHBUF + 64];
-    snprintf(cmd, sizeof(cmd), "find '%s' -maxdepth 1 -name '*.state' -type f", ctx->pkg_dir);
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return 1;
+    DIR *dir = opendir(ctx->pkg_dir);
+    if (!dir) return 1;
     int issues = 0;
-    char line[PATHBUF];
-    while (fgets(line, sizeof(line), fp)) {
-        line[strcspn(line, "\n")] = '\0';
-        char *base = strrchr(line, '/');
-        if (!base) continue;
-        base++;
-        char *dot = strstr(base, ".state");
-        if (!dot) continue;
-        *dot = '\0';
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL) {
+        const char *base = de->d_name;
+        size_t n = strlen(base);
+        if (n <= 6 || strcmp(base + n - 6, ".state") != 0) continue;
+        char pkg[PATHBUF];
+        if (n - 6 >= sizeof(pkg)) continue;
+        memcpy(pkg, base, n - 6);
+        pkg[n - 6] = '\0';
 
         Manifest m;
-        if (load_pkg_state(ctx, base, &m) != 0) continue;
+        if (load_pkg_state(ctx, pkg, &m) != 0) continue;
         for (size_t i = 0; i < m.file_count; ++i) {
             ManifestFile *f = &m.files[i];
             char path[PATHBUF], got[65];
@@ -303,7 +309,7 @@ static int cmd_verify(const Ctx *ctx) {
         }
         manifest_free(&m);
     }
-    pclose(fp);
+    closedir(dir);
     if (issues == 0) {
         printf("✓ All installed files verified successfully.\n");
         return 0;
@@ -312,25 +318,24 @@ static int cmd_verify(const Ctx *ctx) {
 }
 
 static int cmd_list(const Ctx *ctx) {
-    char cmd[PATHBUF + 64];
-    snprintf(cmd, sizeof(cmd), "find '%s' -maxdepth 1 -name '*.state' -type f", ctx->pkg_dir);
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return 1;
-    char line[PATHBUF];
-    while (fgets(line, sizeof(line), fp)) {
-        line[strcspn(line, "\n")] = '\0';
-        char *base = strrchr(line, '/');
-        if (!base) continue;
-        base++;
-        char *dot = strstr(base, ".state");
-        if (dot) *dot = '\0';
+    DIR *dir = opendir(ctx->pkg_dir);
+    if (!dir) return 1;
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL) {
+        const char *base = de->d_name;
+        size_t n = strlen(base);
+        if (n <= 6 || strcmp(base + n - 6, ".state") != 0) continue;
+        char pkg[PATHBUF];
+        if (n - 6 >= sizeof(pkg)) continue;
+        memcpy(pkg, base, n - 6);
+        pkg[n - 6] = '\0';
         Manifest m;
-        if (load_pkg_state(ctx, base, &m) == 0) {
+        if (load_pkg_state(ctx, pkg, &m) == 0) {
             printf("%s\t%s\n", m.name, m.version);
             manifest_free(&m);
         }
     }
-    pclose(fp);
+    closedir(dir);
     return 0;
 }
 

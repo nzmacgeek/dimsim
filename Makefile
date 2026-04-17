@@ -13,6 +13,7 @@ DPKBUILD := $(OUTDIR)/dpkbuild
 COMMON_SRCS := src/common.c src/tar.c src/manifest.c
 
 ifeq ($(STATIC),1)
+# BlueyOS targets musl. Static linking on glibc hosts may have NSS limitations.
 LDFLAGS += -static
 endif
 

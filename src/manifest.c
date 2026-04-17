@@ -2,6 +2,7 @@
 #include "common.h"
 
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -143,8 +144,27 @@ int manifest_parse_full(const char *json, Manifest *m) {
     return json_get_files(json, m);
 }
 
+static int appendf(char **buf, size_t *cap, size_t *off, const char *fmt, ...) {
+    while (1) {
+        va_list ap;
+        va_start(ap, fmt);
+        int n = vsnprintf(*buf + *off, *cap - *off, fmt, ap);
+        va_end(ap);
+        if (n < 0) return -1;
+        if ((size_t)n < *cap - *off) {
+            *off += (size_t)n;
+            return 0;
+        }
+        size_t new_cap = (*cap) * 2 + (size_t)n + 64;
+        char *new_buf = realloc(*buf, new_cap);
+        if (!new_buf) return -1;
+        *buf = new_buf;
+        *cap = new_cap;
+    }
+}
+
 char *manifest_to_json(const Manifest *m) {
-    size_t cap = 4096 + m->file_count * 512;
+    size_t cap = 2048;
     char *buf = (char *)malloc(cap);
     size_t off = 0;
     if (!buf) return NULL;
@@ -160,7 +180,7 @@ char *manifest_to_json(const Manifest *m) {
     char *prerm = json_escape(m->prerm ? m->prerm : "");
     char *postrm = json_escape(m->postrm ? m->postrm : "");
 
-    off += (size_t)snprintf(buf + off, cap - off,
+    if (appendf(&buf, &cap, &off,
         "{\n"
         "  \"name\": \"%s\",\n"
         "  \"version\": \"%s\",\n"
@@ -173,7 +193,9 @@ char *manifest_to_json(const Manifest *m) {
         "  \"maintainer\": \"%s\",\n"
         "  \"homepage\": \"%s\",\n"
         "  \"files\": [\n",
-        name, version, arch, desc, maint, home);
+        name, version, arch, desc, maint, home) != 0) {
+        free(buf); buf = NULL; goto done;
+    }
 
     for (size_t i = 0; i < m->file_count; ++i) {
         ManifestFile *f = &m->files[i];
@@ -183,18 +205,24 @@ char *manifest_to_json(const Manifest *m) {
         char *type = json_escape(f->type ? f->type : "file");
         char *target = json_escape(f->target ? f->target : "");
         if (f->target && *f->target) {
-            off += (size_t)snprintf(buf + off, cap - off,
+            if (appendf(&buf, &cap, &off,
                 "    {\"path\": \"%s\", \"hash\": \"%s\", \"size\": %lld, \"mode\": \"%s\", \"type\": \"%s\", \"target\": \"%s\"}%s\n",
-                path, hash, f->size, mode, type, target, (i + 1 < m->file_count) ? "," : "");
+                path, hash, f->size, mode, type, target, (i + 1 < m->file_count) ? "," : "") != 0) {
+                free(path); free(hash); free(mode); free(type); free(target);
+                free(buf); buf = NULL; goto done;
+            }
         } else {
-            off += (size_t)snprintf(buf + off, cap - off,
+            if (appendf(&buf, &cap, &off,
                 "    {\"path\": \"%s\", \"hash\": \"%s\", \"size\": %lld, \"mode\": \"%s\", \"type\": \"%s\"}%s\n",
-                path, hash, f->size, mode, type, (i + 1 < m->file_count) ? "," : "");
+                path, hash, f->size, mode, type, (i + 1 < m->file_count) ? "," : "") != 0) {
+                free(path); free(hash); free(mode); free(type); free(target);
+                free(buf); buf = NULL; goto done;
+            }
         }
         free(path); free(hash); free(mode); free(type); free(target);
     }
 
-    off += (size_t)snprintf(buf + off, cap - off,
+    if (appendf(&buf, &cap, &off,
         "  ],\n"
         "  \"scripts\": {\n"
         "    \"preinst\": \"%s\",\n"
@@ -203,8 +231,11 @@ char *manifest_to_json(const Manifest *m) {
         "    \"postrm\": \"%s\"\n"
         "  }\n"
         "}\n",
-        preinst, postinst, prerm, postrm);
+        preinst, postinst, prerm, postrm) != 0) {
+        free(buf); buf = NULL;
+    }
 
+done:
     free(name); free(version); free(arch); free(desc); free(maint); free(home);
     free(preinst); free(postinst); free(prerm); free(postrm);
     return buf;

@@ -51,10 +51,16 @@ static int split_name(const char *path, char name[100], char prefix[155]) {
         return 0;
     }
     const char *slash = strrchr(path, '/');
-    if (!slash) return -1;
+    if (!slash) {
+        fprintf(stderr, "tar path too long for ustar header: %s\n", path);
+        return -1;
+    }
     size_t plen = (size_t)(slash - path);
     size_t nlen = strlen(slash + 1);
-    if (plen >= 155 || nlen >= 100) return -1;
+    if (plen >= 155 || nlen >= 100) {
+        fprintf(stderr, "tar path too long for ustar header: %s\n", path);
+        return -1;
+    }
     memcpy(prefix, path, plen);
     memcpy(name, slash + 1, nlen);
     return 0;

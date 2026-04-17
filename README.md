@@ -57,7 +57,7 @@ dimsim list                    List installed packages
 
 ## Package format (.dpk)
 
-A `.dpk` file is a **tar** archive with two top-level directories:
+A `.dpk` file is a **tar** archive with two top-level directories. The C rewrite intentionally dropped zstd compression to avoid runtime compression-library dependencies in static builds.
 
 ```
 meta/
