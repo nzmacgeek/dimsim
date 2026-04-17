@@ -36,8 +36,8 @@ blueyos:
 	$(MAKE) check-static
 
 check-static: all
-	@file "$(DIMSIM)" | grep -q "statically linked"
-	@file "$(DPKBUILD)" | grep -q "statically linked"
+	@file "$(DIMSIM)" | grep -q "statically linked" || { echo "Error: $(DIMSIM) is not statically linked"; exit 1; }
+	@file "$(DPKBUILD)" | grep -q "statically linked" || { echo "Error: $(DPKBUILD) is not statically linked"; exit 1; }
 
 install: all
 	install -d "$(DESTDIR)$(BINDIR)"
