@@ -71,6 +71,12 @@ static int run_script(const char *content, const char *arg, const Ctx *ctx) {
 
 static int save_pkg_state(const Ctx *ctx, const Manifest *m) {
     char path[PATHBUF], spath[PATHBUF];
+
+    if (!is_safe_identifier(m->name)) {
+        fprintf(stderr, "invalid package name: %s\n", m->name);
+        return -1;
+    }
+
     snprintf(path, sizeof(path), "%s/%s.state", ctx->pkg_dir, m->name);
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
@@ -167,6 +173,12 @@ static int install_single(const Ctx *ctx, const char *dpk_path) {
     for (size_t i = 0; i < m.file_count; ++i) {
         ManifestFile *f = &m.files[i];
         char src[PATHBUF], dst[PATHBUF], got[65];
+
+        if (!is_safe_install_path(f->path)) {
+            fprintf(stderr, "invalid file path in manifest: %s\n", f->path);
+            goto fail;
+        }
+
         snprintf(src, sizeof(src), "%s%s", payload_root, f->path);
         full_target_path(ctx, f->path, dst);
         if (strcmp(f->type ? f->type : "file", "symlink") == 0) {

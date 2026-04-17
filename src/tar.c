@@ -66,6 +66,21 @@ static int split_name(const char *path, char name[100], char prefix[155]) {
     return 0;
 }
 
+static int write_all(int fd, const void *buf, size_t count) {
+    const char *p = (const char *)buf;
+    size_t written = 0;
+    while (written < count) {
+        ssize_t n = write(fd, p + written, count - written);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;
+        written += (size_t)n;
+    }
+    return 0;
+}
+
 static int write_header(int fd, const char *tar_path, const struct stat *st, char typeflag, const char *linkname) {
     tar_hdr h;
     unsigned int sum = 0;
@@ -89,7 +104,7 @@ static int write_header(int fd, const char *tar_path, const struct stat *st, cha
     h.chksum[6] = '\0';
     h.chksum[7] = ' ';
 
-    return write(fd, &h, sizeof(h)) == (ssize_t)sizeof(h) ? 0 : -1;
+    return write_all(fd, &h, sizeof(h));
 }
 
 int tar_create_from_list(const char *tar_path, const char **src_paths, const char **tar_paths, size_t count) {
@@ -116,14 +131,14 @@ int tar_create_from_list(const char *tar_path, const char **src_paths, const cha
             in = open(src_paths[i], O_RDONLY);
             if (in < 0) { close(fd); return -1; }
             while ((r = read(in, buf, sizeof(buf))) > 0) {
-                if (write(fd, buf, (size_t)r) != r) { close(in); close(fd); return -1; }
+                if (write_all(fd, buf, (size_t)r) != 0) { close(in); close(fd); return -1; }
             }
             close(in);
             if (r < 0 || write_padding(fd, (size_t)st.st_size) != 0) { close(fd); return -1; }
         }
     }
     static const char zero[1024] = {0};
-    if (write(fd, zero, sizeof(zero)) != (ssize_t)sizeof(zero)) { close(fd); return -1; }
+    if (write_all(fd, zero, sizeof(zero)) != 0) { close(fd); return -1; }
     return close(fd);
 }
 
@@ -134,6 +149,18 @@ static unsigned long parse_octal(const char *s, size_t n) {
         v = (v << 3) + (unsigned long)(s[i] - '0');
     }
     return v;
+}
+
+static int is_safe_path(const char *path) {
+    if (!path || !*path) return 0;
+    if (path[0] == '/') return 0;
+    const char *p = path;
+    while (*p) {
+        if (p[0] == '.' && p[1] == '.' && (p[2] == '/' || p[2] == '\0')) return 0;
+        if (p[0] == '.' && p[1] == '.' && p == path) return 0;
+        p++;
+    }
+    return 1;
 }
 
 int tar_extract(const char *tar_path, const char *dest_dir) {
@@ -150,6 +177,21 @@ int tar_extract(const char *tar_path, const char *dest_dir) {
             char next[512];
             if (read(fd, next, sizeof(next)) != (ssize_t)sizeof(next)) { close(fd); return -1; }
             break;
+        }
+
+        h.name[sizeof(h.name) - 1] = '\0';
+        h.prefix[sizeof(h.prefix) - 1] = '\0';
+        h.linkname[sizeof(h.linkname) - 1] = '\0';
+
+        if (!is_safe_path(h.name)) {
+            fprintf(stderr, "tar: unsafe path in name field\n");
+            close(fd);
+            return -1;
+        }
+        if (h.prefix[0] && !is_safe_path(h.prefix)) {
+            fprintf(stderr, "tar: unsafe path in prefix field\n");
+            close(fd);
+            return -1;
         }
 
         char path[PATHBUF];
@@ -175,7 +217,7 @@ int tar_extract(const char *tar_path, const char *dest_dir) {
                 size_t want = left > sizeof(buf) ? sizeof(buf) : (size_t)left;
                 ssize_t r = read(fd, buf, want);
                 if (r <= 0) { close(out); close(fd); return -1; }
-                if (write(out, buf, (size_t)r) != r) { close(out); close(fd); return -1; }
+                if (write_all(out, buf, (size_t)r) != 0) { close(out); close(fd); return -1; }
                 left -= (unsigned long)r;
             }
             close(out);

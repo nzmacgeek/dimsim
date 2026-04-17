@@ -17,5 +17,7 @@ int walk_dir(const char *root, int (*cb)(const char *abs_path, const char *rel_p
 char *json_escape(const char *s);
 int sha256_hex_file(const char *path, char out_hex[65]);
 void sha256_hex_bytes(const unsigned char *data, size_t len, char out_hex[65]);
+int is_safe_identifier(const char *s);
+int is_safe_install_path(const char *path);
 
 #endif

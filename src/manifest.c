@@ -132,6 +132,20 @@ int manifest_parse_basic(const char *json, Manifest *m) {
     if (json_get_string(json, "description", &m->description) != 0) m->description = xstrdup("");
     if (json_get_string(json, "maintainer", &m->maintainer) != 0) m->maintainer = xstrdup("");
     if (json_get_string(json, "homepage", &m->homepage) != 0) m->homepage = xstrdup("");
+
+    if (!is_safe_identifier(m->name)) {
+        fprintf(stderr, "invalid package name\n");
+        return -1;
+    }
+    if (!is_safe_identifier(m->version)) {
+        fprintf(stderr, "invalid package version\n");
+        return -1;
+    }
+    if (!is_safe_identifier(m->arch)) {
+        fprintf(stderr, "invalid package arch\n");
+        return -1;
+    }
+
     return 0;
 }
 
@@ -180,6 +194,13 @@ char *manifest_to_json(const Manifest *m) {
     char *prerm = json_escape(m->prerm ? m->prerm : "");
     char *postrm = json_escape(m->postrm ? m->postrm : "");
 
+    if (!name || !version || !arch || !desc || !maint || !home || !preinst || !postinst || !prerm || !postrm) {
+        free(buf);
+        free(name); free(version); free(arch); free(desc); free(maint); free(home);
+        free(preinst); free(postinst); free(prerm); free(postrm);
+        return NULL;
+    }
+
     if (appendf(&buf, &cap, &off,
         "{\n"
         "  \"name\": \"%s\",\n"
@@ -204,6 +225,12 @@ char *manifest_to_json(const Manifest *m) {
         char *mode = json_escape(f->mode ? f->mode : "0644");
         char *type = json_escape(f->type ? f->type : "file");
         char *target = json_escape(f->target ? f->target : "");
+        if (!path || !hash || !mode || !type || !target) {
+            free(path); free(hash); free(mode); free(type); free(target);
+            free(buf);
+            buf = NULL;
+            goto done;
+        }
         if (f->target && *f->target) {
             if (appendf(&buf, &cap, &off,
                 "    {\"path\": \"%s\", \"hash\": \"%s\", \"size\": %lld, \"mode\": \"%s\", \"type\": \"%s\", \"target\": \"%s\"}%s\n",

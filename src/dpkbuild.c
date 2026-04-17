@@ -38,32 +38,71 @@ static int collect_files_cb(const char *abs, const char *rel, void *ctxp) {
     char path[PATHBUF];
     snprintf(path, sizeof(path), "/%s", rel);
     f.path = strdup(path);
+    if (!f.path) return -1;
     f.mode = (char *)malloc(8);
+    if (!f.mode) {
+        free(f.path);
+        return -1;
+    }
     snprintf(f.mode, 8, "%04o", (unsigned int)(st.st_mode & 07777));
 
     if (S_ISLNK(st.st_mode)) {
         char target[PATHBUF];
         ssize_t n = readlink(abs, target, sizeof(target) - 1);
-        if (n < 0) return -1;
+        if (n < 0) {
+            free(f.path);
+            free(f.mode);
+            return -1;
+        }
         target[n] = '\0';
         f.type = strdup("symlink");
         f.target = strdup(target);
         f.size = n;
         f.hash = (char *)malloc(65);
+        if (!f.type || !f.target || !f.hash) {
+            free(f.path);
+            free(f.mode);
+            free(f.type);
+            free(f.target);
+            free(f.hash);
+            return -1;
+        }
         sha256_hex_bytes((const unsigned char *)target, (size_t)n, f.hash);
     } else if (S_ISREG(st.st_mode)) {
         f.type = strdup("file");
         f.target = strdup("");
         f.size = st.st_size;
         f.hash = (char *)malloc(65);
-        if (sha256_hex_file(abs, f.hash) != 0) return -1;
+        if (!f.type || !f.target || !f.hash) {
+            free(f.path);
+            free(f.mode);
+            free(f.type);
+            free(f.target);
+            free(f.hash);
+            return -1;
+        }
+        if (sha256_hex_file(abs, f.hash) != 0) {
+            free(f.path);
+            free(f.mode);
+            free(f.type);
+            free(f.target);
+            free(f.hash);
+            return -1;
+        }
     } else {
         free(f.path); free(f.mode);
         return 0;
     }
 
     ManifestFile *n = realloc(ctx->manifest->files, (ctx->manifest->file_count + 1) * sizeof(*ctx->manifest->files));
-    if (!n) return -1;
+    if (!n) {
+        free(f.path);
+        free(f.mode);
+        free(f.type);
+        free(f.target);
+        free(f.hash);
+        return -1;
+    }
     ctx->manifest->files = n;
     ctx->manifest->files[ctx->manifest->file_count++] = f;
     return 0;
@@ -77,12 +116,27 @@ typedef struct {
 
 static int push_path(PathList *pl, const char *src, const char *dst) {
     char **nsrc = realloc(pl->src, (pl->n + 1) * sizeof(*pl->src));
-    char **ndst = realloc(pl->dst, (pl->n + 1) * sizeof(*pl->dst));
-    if (!nsrc || !ndst) return -1;
-    pl->src = nsrc; pl->dst = ndst;
-    pl->src[pl->n] = strdup(src);
-    pl->dst[pl->n] = strdup(dst);
-    if (!pl->src[pl->n] || !pl->dst[pl->n]) return -1;
+    char **ndst;
+    char *src_copy;
+    char *dst_copy;
+
+    if (!nsrc) return -1;
+    pl->src = nsrc;
+
+    ndst = realloc(pl->dst, (pl->n + 1) * sizeof(*pl->dst));
+    if (!ndst) return -1;
+    pl->dst = ndst;
+
+    src_copy = strdup(src);
+    dst_copy = strdup(dst);
+    if (!src_copy || !dst_copy) {
+        free(src_copy);
+        free(dst_copy);
+        return -1;
+    }
+
+    pl->src[pl->n] = src_copy;
+    pl->dst[pl->n] = dst_copy;
     pl->n++;
     return 0;
 }
